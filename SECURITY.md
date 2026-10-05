@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Only the latest released version of `agentless-cli` (and the matching `ghcr.io/Aymen2518/agentless` image) receives
+Only the latest [GitHub Release](https://github.com/Aymen2518/agentless/releases) of `agentless-cli` (and the matching `ghcr.io/Aymen2518/agentless` image) receives
 security fixes.
 
 ## Reporting a vulnerability

@@ -10,8 +10,9 @@ Agent Runtime engine, Memory Bank, PSC-I and Gemini Enterprise. agents-cli is st
 evaluating the agent. Field reference: `examples/agent.yaml` in the agentless repo. Smallest
 starting point: `examples/minimal.yaml`.
 
-Check the tool is installed with `agentless version`. If it's missing, run `uv tool install agentless-cli`
-(or `pipx install agentless-cli`, or use the image `docker run --rm ghcr.io/Aymen2518/agentless`).
+Check the tool is installed with `agentless version`. If it's missing, install a release from GitHub with
+`uv tool install git+https://github.com/Aymen2518/agentless@vX.Y.Z` (or `pipx install …` with the same URL), or use
+the image `docker run --rm ghcr.io/Aymen2518/agentless`.
 
 ## Workflow
 

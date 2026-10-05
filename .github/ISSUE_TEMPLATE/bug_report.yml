@@ -20,7 +20,7 @@ body:
     attributes:
       label: How do you run it?
       options:
-        - uv tool / pipx (agentless-cli)
+        - uv tool / pipx (GitHub Release)
         - Container image (ghcr.io)
         - GitHub Action
         - GitLab component

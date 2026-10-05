@@ -64,4 +64,4 @@
 - [x] Apache-2.0 LICENSE, pyproject metadata, CONTRIBUTING.md
 - [x] CLI container image (Dockerfile) + GitHub workflows (CI, release to ghcr.io)
 - [x] create the GitHub repo and fill in the repository-owner placeholders
-- [ ] publish to PyPI as `agentless-cli` and tag `v0.1.0`
+- [ ] tag `v0.1.0`: GitHub Release (wheel + sdist) and GHCR image

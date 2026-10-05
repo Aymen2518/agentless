@@ -82,15 +82,20 @@ Each deploy diffs the desired config against this record and against live GCP re
 
 ## Install
 
+Releases are published on GitHub: the wheel and sdist are attached to each
+[GitHub Release](https://github.com/Aymen2518/agentless/releases), and the CLI image is on GHCR. Pick a version from the releases page.
+
 ```bash
-uv tool install agentless-cli
-# or
-pipx install agentless-cli
+uv tool install git+https://github.com/Aymen2518/agentless@v0.1.0
+# or, from the release wheel
+uv tool install https://github.com/Aymen2518/agentless/releases/download/v0.1.0/agentless_cli-0.1.0-py3-none-any.whl
+# or with pipx
+pipx install git+https://github.com/Aymen2518/agentless@v0.1.0
 # or, without Python: see "Container image" below
 docker run --rm ghcr.io/Aymen2518/agentless --help
 ```
 
-The PyPI package is `agentless-cli`; the command it installs is `agentless`.
+The package is named `agentless-cli`; the command it installs is `agentless`. The `edge` image tag tracks `main`.
 
 Auth uses Application Default Credentials: `gcloud auth application-default login` locally, Workload Identity
 Federation in CI.
@@ -306,7 +311,7 @@ jobs:
           workload_identity_provider: projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>
           service_account: <deployer-sa>@<project>.iam.gserviceaccount.com
       - uses: astral-sh/setup-uv@v6
-      - run: uvx --from agentless-cli agentless deploy --stage dev
+      - run: uvx --from git+https://github.com/Aymen2518/agentless@v0.1.0 agentless deploy --stage dev
 ```
 
 **GitLab CI**, with no gcloud needed. The job writes an `external_account` credentials file that exchanges the

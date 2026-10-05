@@ -41,6 +41,7 @@ dependencies = [
 [project.urls]
 Homepage = "https://aymen2518.github.io/agentless"
 Documentation = "https://aymen2518.github.io/agentless/getting-started/install/"
+Releases = "https://github.com/Aymen2518/agentless/releases"
 Source = "https://github.com/Aymen2518/agentless"
 Issues = "https://github.com/Aymen2518/agentless/issues"
 Changelog = "https://github.com/Aymen2518/agentless/blob/main/CHANGELOG.md"

@@ -8,7 +8,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [0.1.0] - 2026-10-05
 
-First public release, published on PyPI as `agentless-cli` and as the image `ghcr.io/Aymen2518/agentless`.
+First public release: wheel and sdist (`agentless-cli`) on the GitHub Release, and the image `ghcr.io/Aymen2518/agentless`.
 
 ### Added
 - One declarative `agent.yaml` per agent, with stages, params and a Pydantic-validated schema exported as JSON
