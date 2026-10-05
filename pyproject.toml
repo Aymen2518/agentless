@@ -1,12 +1,12 @@
 [project]
-name = "agentless"
-version = "0.1.0"
+name = "agentless-cli"
+dynamic = ["version"]
 description = "Serverless-style declarative deployment of ADK agents to Google Cloud Agent Platform (Agent Runtime)."
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{ name = "agentless contributors" }]
-keywords = ["adk", "agents", "agent-engine", "vertex-ai", "google-cloud", "serverless", "deployment", "iac"]
+keywords = ["adk", "agents", "gcp", "vertex-ai", "agent-engine", "serverless", "deployment", "cli"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
@@ -39,8 +39,12 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/OWNER/agentless"
-Issues = "https://github.com/OWNER/agentless/issues"
+Homepage = "https://aymen2518.github.io/agentless"
+Documentation = "https://aymen2518.github.io/agentless/getting-started/install/"
+Releases = "https://github.com/Aymen2518/agentless/releases"
+Source = "https://github.com/Aymen2518/agentless"
+Issues = "https://github.com/Aymen2518/agentless/issues"
+Changelog = "https://github.com/Aymen2518/agentless/blob/main/CHANGELOG.md"
 
 [project.scripts]
 agentless = "agentless.cli:app"
@@ -51,6 +55,9 @@ dev = ["pytest>=8.3", "ruff>=0.9", "ty>=0.0.1a1"]
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/agentless/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agentless"]

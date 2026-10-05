@@ -82,13 +82,20 @@ Each deploy diffs the desired config against this record and against live GCP re
 
 ## Install
 
+Releases are published on GitHub: the wheel and sdist are attached to each
+[GitHub Release](https://github.com/Aymen2518/agentless/releases), and the CLI image is on GHCR. Pick a version from the releases page.
+
 ```bash
-uv tool install git+https://github.com/OWNER/agentless
-# or, from a checkout
-uv sync && uv run agentless --help
+uv tool install git+https://github.com/Aymen2518/agentless@v0.1.0
+# or, from the release wheel
+uv tool install https://github.com/Aymen2518/agentless/releases/download/v0.1.0/agentless_cli-0.1.0-py3-none-any.whl
+# or with pipx
+pipx install git+https://github.com/Aymen2518/agentless@v0.1.0
 # or, without Python: see "Container image" below
-docker run --rm ghcr.io/OWNER/agentless --help
+docker run --rm ghcr.io/Aymen2518/agentless --help
 ```
+
+The package is named `agentless-cli`; the command it installs is `agentless`. The `edge` image tag tracks `main`.
 
 Auth uses Application Default Credentials: `gcloud auth application-default login` locally, Workload Identity
 Federation in CI.
@@ -304,14 +311,14 @@ jobs:
           workload_identity_provider: projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>
           service_account: <deployer-sa>@<project>.iam.gserviceaccount.com
       - uses: astral-sh/setup-uv@v6
-      - run: uvx --from git+https://github.com/OWNER/agentless agentless deploy --stage dev
+      - run: uvx --from git+https://github.com/Aymen2518/agentless@v0.1.0 agentless deploy --stage dev
 ```
 
 **GitLab CI**, with no gcloud needed. The job writes an `external_account` credentials file that exchanges the
 GitLab OIDC token for the deployer service account:
 ```yaml
 deploy:dev:
-  image: { name: ghcr.io/OWNER/agentless:latest, entrypoint: [""] }
+  image: { name: ghcr.io/Aymen2518/agentless:latest, entrypoint: [""] }
   variables:
     WIF_PROVIDER: projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>
     DEPLOYER_SA: <deployer-sa>@<project>.iam.gserviceaccount.com
@@ -338,7 +345,7 @@ The CLI is published as a container image, so CI jobs don't need Python:
 docker run --rm \
   -v "$PWD:/workspace" \
   -v "$HOME/.config/gcloud:/home/agentless/.config/gcloud:ro" \
-  ghcr.io/OWNER/agentless plan --stage dev
+  ghcr.io/Aymen2518/agentless plan --stage dev
 ```
 
 - Run it from your agents-cli project directory, which is mounted at `/workspace`.
@@ -424,7 +431,6 @@ uv sync
 uv run pytest
 uv run ruff check src tests && uv run ruff format --check src tests
 uv run ty check src
-uv tool install --editable .          # puts `agentless` on PATH, running from this checkout
 ```
 
 **AI skills.** Two [Claude Code skills](https://docs.claude.com/en/docs/claude-code/skills) under `.claude/skills/`

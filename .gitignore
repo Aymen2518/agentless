@@ -5,3 +5,6 @@ __pycache__/
 .ruff_cache/
 dist/
 .agentless/
+site/node_modules/
+site/dist/
+site/.astro/
