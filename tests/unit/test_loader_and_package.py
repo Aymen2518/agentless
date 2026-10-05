@@ -66,6 +66,49 @@ def test_package_honours_ignore_rules_and_excludes(agent_dir):
     assert "app/agent.py" in pkg.files
 
 
+@pytest.mark.parametrize("ignore_file", [None, ".gitignore", ".gcloudignore"])
+def test_virtualenvs_and_bytecode_skipped_without_rules(agent_dir, ignore_file):
+    for name in (".gitignore", ".gcloudignore"):
+        (agent_dir / name).unlink(missing_ok=True)
+    if ignore_file:
+        (agent_dir / ignore_file).write_text("*.secret\n")
+    for rel in (".venv/bin/python", "venv/lib/x.py", "app/__pycache__/agent.cpython-311.pyc", "app/old.pyc"):
+        (agent_dir / rel).parent.mkdir(parents=True, exist_ok=True)
+        (agent_dir / rel).write_text("x")
+    files = collect(agent_dir).files
+    assert not [f for f in files if f.startswith((".venv/", "venv/")) or "__pycache__" in f or f.endswith(".pyc")]
+    assert "app/agent.py" in files
+
+
+def test_defaults_can_be_reincluded(agent_dir):
+    (agent_dir / "venv").mkdir()
+    (agent_dir / "venv" / "keep.py").write_text("x")
+    (agent_dir / ".gcloudignore").write_text("!venv/\n")
+    assert "venv/keep.py" in collect(agent_dir).files
+
+
+def test_symlink_outside_the_agent_is_rejected(agent_dir, tmp_path):
+    outside = tmp_path / "python3.11"
+    outside.write_text("bin")
+    (agent_dir / "app" / "python").symlink_to(outside)
+    with pytest.raises(PackageError, match=r"app/python is a symlink to .*outside the agent directory"):
+        collect(agent_dir)
+
+
+def test_broken_symlink_is_rejected(agent_dir):
+    (agent_dir / "app" / "gone").symlink_to(agent_dir / "nope")
+    with pytest.raises(PackageError, match="app/gone is a symlink"):
+        collect(agent_dir)
+
+
+def test_ignored_or_internal_symlinks_are_fine(agent_dir, tmp_path):
+    (tmp_path / "elsewhere").write_text("x")
+    (agent_dir / ".venv").mkdir(exist_ok=True)
+    (agent_dir / ".venv" / "python").symlink_to(tmp_path / "elsewhere")
+    (agent_dir / "app" / "alias.py").symlink_to(agent_dir / "app" / "agent.py")
+    assert "app/alias.py" in collect(agent_dir).files
+
+
 def test_gcloudignore_takes_precedence(agent_dir):
     (agent_dir / ".gcloudignore").write_text("app/\n")
     pkg = collect(agent_dir)

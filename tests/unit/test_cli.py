@@ -90,3 +90,26 @@ def test_plugin_hooks_can_veto(fake_cli, gcp):
     pm = plugin_manager([Policy()])
     with pytest.raises(cli.ConfigError, match="owner"):
         pm.hook.agentless_after_load(project=project)
+
+
+def test_symlink_outside_agent_fails_plan_cleanly(fake_cli, tmp_path):
+    (tmp_path / "python3.11").write_text("bin")
+    (fake_cli / "app" / "python").symlink_to(tmp_path / "python3.11")
+    result = runner.invoke(cli.app, ["plan", "-c", str(fake_cli / "agent.yaml")])
+    assert result.exit_code == 1
+    assert "app/python is a symlink" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_sdk_packaging_value_error_becomes_a_clean_failure(tmp_path):
+    from types import SimpleNamespace
+
+    from agentless.providers.agent_runtime.clients import GcpClients
+
+    def refuse(**_kwargs):
+        raise ValueError("File path './x' is outside the project directory")
+
+    clients = GcpClients("proj", "europe-west1")
+    clients.__dict__["_vertex"] = SimpleNamespace(agent_engines=SimpleNamespace(_create_config=refuse))
+    with pytest.raises(RuntimeError, match="packaging the agent source failed: File path './x'"):
+        clients.engine_code_spec(tmp_path, ["./x"], {}, "google-adk")
