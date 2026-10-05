@@ -192,12 +192,15 @@ class GcpClients:
     ) -> tuple[dict[str, Any], list[str]]:
         """Build `spec.source_code_spec` (inline tarball) using the SDK, as agents-cli does."""
         with contextlib.chdir(source_dir):
-            cfg = self._vertex.agent_engines._create_config(
-                mode="update",
-                source_packages=source_packages,
-                image_spec={"build_args": build_args} if build_args else {},
-                agent_framework=framework,
-            )
+            try:
+                cfg = self._vertex.agent_engines._create_config(
+                    mode="update",
+                    source_packages=source_packages,
+                    image_spec={"build_args": build_args} if build_args else {},
+                    agent_framework=framework,
+                )
+            except ValueError as e:  # the SDK validates the source tree with bare ValueErrors
+                raise RuntimeError(f"packaging the agent source failed: {e}") from e
         masks = [m for m in cfg.get("update_mask", "").split(",") if m.startswith("spec.source_code_spec")]
         return {"source_code_spec": cfg["spec"]["source_code_spec"]}, masks
 
