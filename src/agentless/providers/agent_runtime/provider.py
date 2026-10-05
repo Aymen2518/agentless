@@ -24,9 +24,17 @@ class DeployError(Exception):
 def make_store(project: Project) -> StateStore:
     """GCS store when provider.stagingBucket is set, else a local store."""
     cfg = project.config
+    deployer = project.deployer.describe()
     if cfg.provider.staging_bucket:
-        return GcsStateStore(cfg.provider.staging_bucket, cfg.service, cfg.provider.stage, project=cfg.provider.project)
-    return LocalStateStore(project.config_path.parent, cfg.provider.stage)
+        return GcsStateStore(
+            cfg.provider.staging_bucket,
+            cfg.service,
+            cfg.provider.stage,
+            project=cfg.provider.project,
+            credentials=project.deployer.credentials(),
+            deployer=deployer,
+        )
+    return LocalStateStore(project.config_path.parent, cfg.provider.stage, deployer=deployer)
 
 
 class AgentRuntimeProvider:
@@ -52,7 +60,7 @@ class AgentRuntimeProvider:
     def clients(self) -> Any:
         """GCP facade, created on first use so offline commands never authenticate."""
         cfg = self.project.config.provider
-        return self._clients or GcpClients(cfg.project, cfg.region)
+        return self._clients or GcpClients(cfg.project, cfg.region, self.project.deployer)
 
     @functools.cached_property
     def store(self) -> StateStore:
@@ -171,6 +179,7 @@ class AgentRuntimeProvider:
             "state": self.store.location,
             "updatedAt": state.updated_at,
             "updatedBy": state.updated_by,
+            "deployer": self.project.deployer.describe(),
         }
         if name:
             engine_id = name.rsplit("/", 1)[-1]

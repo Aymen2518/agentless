@@ -10,10 +10,13 @@ from typing import Any
 
 import yaml
 
+from agentless.auth import Deployer
 from agentless.config.variables import Missing, SourceContext, SourceFn, VariableError, dig
 
 
-def build_sources(*, root: Path, stage: str, options: dict[str, Any], params: dict[str, Any]) -> dict[str, SourceFn]:
+def build_sources(
+    *, root: Path, stage: str, options: dict[str, Any], params: dict[str, Any], deployer: Deployer | None = None
+) -> dict[str, SourceFn]:
     """Return the built-in source table for one load.
 
     Args:
@@ -21,7 +24,9 @@ def build_sources(*, root: Path, stage: str, options: dict[str, Any], params: di
         stage: The selected stage.
         options: CLI options exposed through `${opt:...}`.
         params: CLI `--param` overrides, highest priority for `${param:...}`.
+        deployer: Identity used to read `${secret:}` and `${tf:}`.
     """
+    deployer = deployer or Deployer()
 
     def self_(ctx: SourceContext, _arg: str | None, key: str) -> Any:
         return ctx.resolver.get(key)
@@ -62,12 +67,12 @@ def build_sources(*, root: Path, stage: str, options: dict[str, Any], params: di
         if not name.startswith("projects/"):
             secret_id, _, version = key.partition("@")
             name = f"projects/{ctx.resolver.get('provider.project')}/secrets/{secret_id}/versions/{version or 'latest'}"
-        return _access_secret(name)
+        return _access_secret(name, deployer)
 
     def tf(ctx: SourceContext, arg: str | None, key: str) -> Any:
         if not arg or not arg.startswith("gs://"):
             raise VariableError(ctx.path, "tf source needs a GCS state path: ${tf(gs://bucket/prefix):output}")
-        outputs = _read_tf_outputs(arg, _project_or_none(ctx))
+        outputs = _read_tf_outputs(arg, _project_or_none(ctx), deployer)
         if key not in outputs:
             raise Missing(f"output {key!r} not in {arg}")
         return outputs[key]["value"]
@@ -100,19 +105,20 @@ def _load_document(path: Path) -> Any:
 
 
 @functools.cache
-def _access_secret(name: str) -> str:
+def _access_secret(name: str, deployer: Deployer) -> str:
     from google.api_core import exceptions
     from google.cloud import secretmanager
 
     try:
-        response = secretmanager.SecretManagerServiceClient().access_secret_version(name=name)
+        client = secretmanager.SecretManagerServiceClient(credentials=deployer.credentials())
+        response = client.access_secret_version(name=name)
     except exceptions.NotFound:
         raise Missing(f"secret {name} not found") from None
     return response.payload.data.decode("utf-8")
 
 
 @functools.cache
-def _read_tf_outputs(location: str, project: str | None) -> dict[str, Any]:
+def _read_tf_outputs(location: str, project: str | None, deployer: Deployer) -> dict[str, Any]:
     from google.api_core import exceptions
     from google.cloud import storage
 
@@ -121,7 +127,8 @@ def _read_tf_outputs(location: str, project: str | None) -> dict[str, Any]:
         path = f"{path}/default.tfstate"
     bucket, _, blob = path.partition("/")
     try:
-        state = json.loads(storage.Client(project=project).bucket(bucket).blob(blob).download_as_bytes())
+        client = storage.Client(project=project, credentials=deployer.credentials())
+        state = json.loads(client.bucket(bucket).blob(blob).download_as_bytes())
     except exceptions.NotFound:
         raise Missing(f"terraform state gs://{path} not found") from None
     return state.get("outputs", {})

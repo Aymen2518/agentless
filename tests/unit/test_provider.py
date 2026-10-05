@@ -362,7 +362,7 @@ def test_partial_iam_failure_keeps_track_of_earlier_grants(make_provider, gcp):
 
 
 def test_secret_values_never_reach_plan_or_state(make_provider, gcp, edit, monkeypatch):
-    monkeypatch.setattr("agentless.config.sources._access_secret", lambda name: "hunter2")
+    monkeypatch.setattr("agentless.config.sources._access_secret", lambda name, deployer: "hunter2")
     edit(lambda d: d["agent"]["environment"].update(API_KEY="${secret:api-key}"))
     _, cs = make_provider().plan(DeployOptions())
     deploy(make_provider)

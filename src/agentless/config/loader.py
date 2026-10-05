@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
 from pydantic import ValidationError
 
+from agentless.auth import ENV_VAR, FLAG, Deployer
 from agentless.compat.agents_cli import Manifest, read_manifest
-from agentless.config.schema import AgentConfig
+from agentless.config.schema import AgentConfig, DeployerConfig
 from agentless.config.sources import build_sources
 from agentless.config.variables import Missing, Resolver, SourceFn, VariableError
 
@@ -31,6 +33,7 @@ class Project:
     source_dir: Path
     manifest: Manifest | None
     sensitive: frozenset[str] = frozenset()
+    deployer: Deployer = field(default_factory=Deployer)
 
     @property
     def stage(self) -> str:
@@ -50,6 +53,7 @@ def load_project(
     options: dict[str, Any] | None = None,
     params: dict[str, Any] | None = None,
     extra_sources: dict[str, SourceFn] | None = None,
+    impersonate: str | None = None,
 ) -> Project:
     """Load and fully validate a project.
 
@@ -59,6 +63,7 @@ def load_project(
         options: All CLI options, exposed as `${opt:...}`.
         params: `--param k=v` overrides.
         extra_sources: Variable sources contributed by plugins.
+        impersonate: `--impersonate-service-account` value; beats the env var and `provider.deployer`.
 
     Raises:
         ConfigError: When the file is unreadable, a variable fails, or validation fails.
@@ -80,9 +85,12 @@ def load_project(
 
     sensitive: set[str] = set()
 
-    def make_resolver(selected: str) -> Resolver:
-        sources = build_sources(root=root, stage=selected, options=options, params=params)
+    def make_resolver(selected: str, deployer: Deployer | None = None, *, offline: bool = False) -> Resolver:
+        sources = build_sources(root=root, stage=selected, options=options, params=params, deployer=deployer)
         sources.update(extra_sources or {})
+        if offline:
+            # The deployer is chosen before anything authenticates, so it can't depend on GCP reads.
+            sources["secret"] = sources["tf"] = _needs_credentials
         secret = sources["secret"]
 
         def tracked_secret(ctx: Any, arg: str | None, key: str) -> Any:
@@ -100,7 +108,8 @@ def load_project(
         if stages and selected not in stages and "default" not in stages:
             raise ConfigError(f"stage {selected!r} is not declared under `stages` ({', '.join(stages)})")
         raw.setdefault("provider", {})["stage"] = selected
-        resolved = make_resolver(selected).resolve_all()
+        deployer = _deployer(impersonate, make_resolver(selected, offline=True))
+        resolved = make_resolver(selected, deployer).resolve_all()
     except VariableError as e:
         raise ConfigError(f"variable error at {e}") from e
 
@@ -112,7 +121,7 @@ def load_project(
     source_dir = (root / config.agent.source.path).resolve()
     manifest = read_manifest(source_dir)
     _check_agents_cli_project(config, source_dir, manifest)
-    return Project(config, resolved, config_path.resolve(), source_dir, manifest, frozenset(sensitive))
+    return Project(config, resolved, config_path.resolve(), source_dir, manifest, frozenset(sensitive), deployer)
 
 
 def _bootstrap_stage(make_resolver: Any) -> str:
@@ -123,6 +132,35 @@ def _bootstrap_stage(make_resolver: Any) -> str:
     except Missing:
         return "dev"
     return str(value) if value else "dev"
+
+
+def _needs_credentials(ctx: Any, _arg: str | None, _key: str) -> Any:
+    raise VariableError(ctx.path, "provider.deployer cannot use ${secret:} or ${tf:}: they are read as the deployer")
+
+
+def _deployer(flag: str | None, resolver: Resolver) -> Deployer:
+    """Pick the identity: `--impersonate-service-account`, then the env var, then `provider.deployer`, then ADC."""
+    try:
+        node = resolver.get("provider.deployer")
+    except Missing:
+        node = None
+    try:
+        declared = DeployerConfig.model_validate(node or {})
+    except ValidationError as e:
+        lines = [
+            f"  - provider.deployer.{'.'.join(map(str, err['loc'])) or '<root>'}: {err['msg']}" for err in e.errors()
+        ]
+        raise ConfigError("\n".join(["agent.yaml is invalid:", *lines])) from e
+    try:
+        if flag:
+            return Deployer.from_chain(flag, FLAG)
+        if os.environ.get(ENV_VAR):
+            return Deployer.from_chain(os.environ[ENV_VAR], ENV_VAR)
+    except ValueError as e:
+        raise ConfigError(str(e)) from e
+    if declared.impersonate:
+        return Deployer(declared.impersonate, tuple(declared.delegates), "agent.yaml")
+    return Deployer()
 
 
 def _check_agents_cli_project(config: AgentConfig, source_dir: Path, manifest: Manifest | None) -> None:

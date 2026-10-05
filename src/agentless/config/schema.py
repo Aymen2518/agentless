@@ -9,6 +9,8 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic.alias_generators import to_camel
 
+from agentless.auth import check_service_account
+
 _LABEL_RE = re.compile(r"^[a-z][a-z0-9_-]{0,62}$")
 _SA_ID_RE = re.compile(r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$")
 
@@ -23,6 +25,35 @@ class StageConfig(_Model):
     params: dict[str, Any] = Field(default_factory=dict)
 
 
+class DeployerConfig(_Model):
+    """Service account agentless impersonates for every GCP call (needs roles/iam.serviceAccountTokenCreator)."""
+
+    impersonate: str | None = Field(
+        default=None,
+        description="Deployer service account email. Overridden by --impersonate-service-account and "
+        "AGENTLESS_IMPERSONATE_SERVICE_ACCOUNT. Cannot use ${secret:} or ${tf:}.",
+    )
+    delegates: list[str] = Field(
+        default_factory=list, description="Delegation chain, in order, when the caller cannot impersonate directly."
+    )
+
+    @field_validator("impersonate")
+    @classmethod
+    def _sa_email(cls, v: str | None) -> str | None:
+        return check_service_account(v) if v else None
+
+    @field_validator("delegates")
+    @classmethod
+    def _sa_emails(cls, v: list[str]) -> list[str]:
+        return [check_service_account(email) for email in v]
+
+    @model_validator(mode="after")
+    def _delegates_need_target(self) -> DeployerConfig:
+        if self.delegates and not self.impersonate:
+            raise ValueError("delegates need `impersonate`")
+        return self
+
+
 class Provider(_Model):
     """Where and how the agent is deployed."""
 
@@ -32,6 +63,7 @@ class Provider(_Model):
     region: str
     staging_bucket: str | None = Field(default=None, description="Bucket holding agentless state, without gs://.")
     labels: dict[str, str] = Field(default_factory=dict)
+    deployer: DeployerConfig = Field(default_factory=DeployerConfig)
 
     @field_validator("region")
     @classmethod

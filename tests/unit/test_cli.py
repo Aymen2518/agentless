@@ -7,21 +7,8 @@ from agentless import cli
 from agentless.config.loader import load_project
 from agentless.hooks import plugin_manager
 from agentless.providers.agent_runtime import spec as engine_spec
-from agentless.providers.agent_runtime.provider import AgentRuntimeProvider
-from agentless.state.store import LocalStateStore
 
 runner = CliRunner()
-
-
-@pytest.fixture
-def fake_cli(monkeypatch, gcp, agent_dir):
-    def provider(project, pm):
-        return AgentRuntimeProvider(
-            project, hooks=pm, clients=gcp, store=LocalStateStore(agent_dir, project.stage), echo=lambda _: None
-        )
-
-    monkeypatch.setattr(cli, "_provider", provider)
-    return agent_dir
 
 
 def test_init_from_manifest_produces_valid_config(agent_dir):
@@ -61,7 +48,7 @@ def test_plan_deploy_info_remove(fake_cli):
 
 
 def test_print_masks_secret_values(agent_dir, monkeypatch):
-    monkeypatch.setattr("agentless.config.sources._access_secret", lambda name: "hunter2")
+    monkeypatch.setattr("agentless.config.sources._access_secret", lambda name, deployer: "hunter2")
     path = agent_dir / "agent.yaml"
     path.write_text(path.read_text() + "custom: { token: '${secret:api-token}' }\n")
     result = runner.invoke(cli.app, ["print", "-c", str(path)])

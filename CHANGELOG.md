@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+- Deploy as a service account: every GCP call, including `${secret:}` / `${tf:}` reads, the state bucket, `logs`
+  and `invoke`, can impersonate a deployer. Set it with `--impersonate-service-account` (gcloud-style
+  `delegate,…,target` chains), `AGENTLESS_IMPERSONATE_SERVICE_ACCOUNT`, or `provider.deployer.impersonate` /
+  `delegates` in `agent.yaml` (per stage through `${param:}`), in that order of precedence.
+- `plan` and `deploy` headers, `validate`, `info`, the state lock and `updatedBy` show the impersonated deployer.
+- A hint about `roles/iam.serviceAccountTokenCreator` when impersonation is refused.
+
 ## [0.1.1] - 2026-10-05
 
 ### Fixed

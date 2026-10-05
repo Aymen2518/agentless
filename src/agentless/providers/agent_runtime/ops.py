@@ -32,11 +32,12 @@ def read_logs(
     severity: str | None,
     tail: bool,
     echo: Callable[[str], None],
+    credentials: Any,
 ) -> None:
     """Print engine logs, optionally following new entries."""
     from google.cloud import logging as cloud_logging
 
-    client = cloud_logging.Client(project=project)
+    client = cloud_logging.Client(project=project, credentials=credentials)
     start = datetime.datetime.now(tz=datetime.UTC) - since
     seen: set[str] = set()
     while True:
@@ -56,13 +57,18 @@ def read_logs(
 
 
 def invoke(
-    region: str, engine_name: str, message: str, *, user_id: str, session_id: str | None, project: str
+    region: str,
+    engine_name: str,
+    message: str,
+    *,
+    user_id: str,
+    session_id: str | None,
+    project: str,
+    credentials: Any,
 ) -> Iterator[dict[str, Any]]:
     """Stream ADK events from `:streamQuery`, creating a session when none is given (same calls as agents-cli)."""
-    import google.auth
     from google.auth.transport.requests import AuthorizedSession
 
-    credentials, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
     http = AuthorizedSession(credentials)
     http.headers["X-Goog-User-Project"] = project
     base = f"https://{region}-aiplatform.googleapis.com/v1/{engine_name}"

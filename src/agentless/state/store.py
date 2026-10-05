@@ -86,11 +86,12 @@ def _ci_job_url() -> str | None:
     return None
 
 
-def _holder(operation: str) -> str:
+def _holder(operation: str, deployer: str | None) -> str:
     return json.dumps(
         {
             "operation": operation,
             "who": f"{getpass.getuser()}@{socket.gethostname()}",
+            "as": deployer,
             "ci_job": _ci_job_url(),
             "since": _now(),
         }
@@ -101,18 +102,30 @@ def _now() -> str:
     return datetime.datetime.now(tz=datetime.UTC).isoformat(timespec="seconds")
 
 
-def _stamp(state: State) -> None:
+def _stamp(state: State, deployer: str | None) -> None:
     state.updated_at = _now()
-    state.updated_by = os.environ.get("GITLAB_USER_LOGIN") or os.environ.get("GITHUB_ACTOR") or getpass.getuser()
+    who = os.environ.get("GITLAB_USER_LOGIN") or os.environ.get("GITHUB_ACTOR") or getpass.getuser()
+    state.updated_by = f"{who} as {deployer}" if deployer else who
 
 
 class GcsStateStore:
     """State at gs://<bucket>/agentless/<service>/<stage>/state.json, locked via generation preconditions."""
 
-    def __init__(self, bucket: str, service: str, stage: str, *, project: str | None = None, client: Any = None):
+    def __init__(
+        self,
+        bucket: str,
+        service: str,
+        stage: str,
+        *,
+        project: str | None = None,
+        client: Any = None,
+        credentials: Any = None,
+        deployer: str | None = None,
+    ):
         from google.cloud import storage
 
-        self._bucket = (client or storage.Client(project=project)).bucket(bucket)
+        self._bucket = (client or storage.Client(project=project, credentials=credentials)).bucket(bucket)
+        self.deployer = deployer
         prefix = f"agentless/{service}/{stage}"
         self._state = self._bucket.blob(f"{prefix}/state.json")
         self._lock = self._bucket.blob(f"{prefix}/lock.json")
@@ -127,7 +140,7 @@ class GcsStateStore:
             return None
 
     def write(self, state: State) -> None:  # noqa: D102
-        _stamp(state)
+        _stamp(state, self.deployer)
         self._state.upload_from_string(state.to_json(), content_type="application/json")
 
     def delete(self) -> None:  # noqa: D102
@@ -141,7 +154,7 @@ class GcsStateStore:
         from google.api_core import exceptions
 
         try:
-            self._lock.upload_from_string(_holder(operation), if_generation_match=0)
+            self._lock.upload_from_string(_holder(operation, self.deployer), if_generation_match=0)
         except exceptions.PreconditionFailed:
             holder = self._lock.download_as_text() if self._lock.exists() else "unknown"
             raise LockedError(f"{self.location} is locked by {holder} (use `agentless unlock` if stale)") from None
@@ -161,7 +174,8 @@ class GcsStateStore:
 class LocalStateStore:
     """State in `.agentless/<stage>/state.json` next to agent.yaml; for local experiments only."""
 
-    def __init__(self, root: Path, stage: str):
+    def __init__(self, root: Path, stage: str, *, deployer: str | None = None):
+        self.deployer = deployer
         self._dir = root / ".agentless" / stage
         self._state = self._dir / "state.json"
         self._lock = self._dir / "lock.json"
@@ -171,7 +185,7 @@ class LocalStateStore:
         return State.from_json(self._state.read_text(encoding="utf-8")) if self._state.is_file() else None
 
     def write(self, state: State) -> None:  # noqa: D102
-        _stamp(state)
+        _stamp(state, self.deployer)
         self._dir.mkdir(parents=True, exist_ok=True)
         tmp = self._state.with_suffix(".tmp")
         tmp.write_text(state.to_json(), encoding="utf-8")
@@ -190,7 +204,7 @@ class LocalStateStore:
                 f"{self._lock} exists: {self._lock.read_text()} (use `agentless unlock` if stale)"
             ) from None
         with os.fdopen(fd, "w") as fh:
-            fh.write(_holder(operation))
+            fh.write(_holder(operation, self.deployer))
         try:
             yield
         finally:

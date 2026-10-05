@@ -18,6 +18,13 @@
   `pyproject.toml`. Always run from the repo root.
 
 ## Google clients
+- **Every SDK client takes `credentials=`** from `Project.deployer.credentials()` (or `GcpClients._credentials`).
+  A client built without it silently uses ADC and bypasses impersonation. `tests/unit/test_impersonation.py`
+  scans the source for this, and only `auth.py` may call `google.auth.default`.
+- **`provider.deployer` is resolved before anything authenticates** (loader `offline=True`), so `${secret:}` and
+  `${tf:}` are rejected there. Those reads themselves need the deployer's credentials.
+- **`gcloud config set auth/impersonate_service_account` doesn't reach Python clients.** Only an
+  `impersonated_service_account` ADC file or agentless's own setting do.
 - **Always pass `project=`** to `storage.Client`, `bigquery.Client` and similar. User ADC often has no default
   project, which gives `OSError: Project was not passed`.
 - **The Agent Platform SDK was renamed:** use `agentplatform.Client`, with `vertexai.Client` as the fallback. The

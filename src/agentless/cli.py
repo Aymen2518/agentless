@@ -14,7 +14,7 @@ from typing import Annotated, Any, TypeVar, cast
 import typer
 import yaml
 
-from agentless import __version__
+from agentless import __version__, auth
 from agentless.compat.agents_cli import read_manifest
 from agentless.config.loader import DEFAULT_CONFIG_FILE, ConfigError, Project, load_project
 from agentless.config.schema import AgentConfig
@@ -36,6 +36,15 @@ ConfigOpt = Annotated[Path, typer.Option("--config", "-c", help="Path to agent.y
 StageOpt = Annotated[str | None, typer.Option("--stage", "-s", help="Stage to target (default: provider.stage).")]
 ParamOpt = Annotated[list[str] | None, typer.Option("--param", "-p", help="Override a stage param: key=value.")]
 YesOpt = Annotated[bool, typer.Option("--yes", "-y", help="Do not ask for confirmation.")]
+ImpersonateOpt = Annotated[
+    str | None,
+    typer.Option(
+        auth.FLAG,
+        metavar="SA_EMAIL",
+        help=f"Act as this service account (`a,b,target` chains through delegates). Overrides {auth.ENV_VAR} and "
+        "provider.deployer.",
+    ),
+]
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -58,10 +67,20 @@ def handle_errors(fn: F) -> F:
             _fail(str(e))
         except Exception as e:  # GCP API errors surface with their own message
             if type(e).__module__.startswith(("google.", "requests")) or isinstance(e, RuntimeError):
-                _fail(f"{type(e).__name__}: {e}")
+                _fail(f"{type(e).__name__}: {e}{_hint(e)}")
             raise
 
     return cast(F, wrapper)
+
+
+def _hint(error: Exception) -> str:
+    """Point at the missing grant when impersonation is refused."""
+    if "getAccessToken" in str(error):
+        return (
+            "\n  hint: the caller needs roles/iam.serviceAccountTokenCreator on the impersonated service account "
+            "(and on each delegate)"
+        )
+    return ""
 
 
 def _params(raw: list[str] | None) -> dict[str, str]:
@@ -74,10 +93,17 @@ def _params(raw: list[str] | None) -> dict[str, str]:
     return out
 
 
-def _load(config: Path, stage: str | None, params: list[str] | None, **options: Any) -> tuple[Project, Any]:
+def _load(
+    config: Path, stage: str | None, params: list[str] | None, impersonate: str | None = None, **options: Any
+) -> tuple[Project, Any]:
     pm = plugin_manager()
     project = load_project(
-        config, stage=stage, options=options, params=_params(params), extra_sources=variable_sources(pm)
+        config,
+        stage=stage,
+        options=options,
+        params=_params(params),
+        extra_sources=variable_sources(pm),
+        impersonate=impersonate,
     )
     pm.hook.agentless_after_load(project=project)
     return project, pm
@@ -89,8 +115,11 @@ def _provider(project: Project, pm: Any) -> AgentRuntimeProvider:
 
 def _header(project: Project, verb: str) -> None:
     cfg = project.config
+    identity = project.deployer.describe()
     typer.secho(
-        f"{verb} {cfg.service} → stage {cfg.provider.stage} ({cfg.provider.project}, {cfg.provider.region})", bold=True
+        f"{verb} {cfg.service} → stage {cfg.provider.stage} ({cfg.provider.project}, {cfg.provider.region})"
+        + (f" as {identity}" if identity else ""),
+        bold=True,
     )
 
 
@@ -132,17 +161,29 @@ def init(
 
 @app.command()
 @handle_errors
-def validate(config: ConfigOpt = Path(DEFAULT_CONFIG_FILE), stage: StageOpt = None, param: ParamOpt = None) -> None:
+def validate(
+    config: ConfigOpt = Path(DEFAULT_CONFIG_FILE),
+    stage: StageOpt = None,
+    param: ParamOpt = None,
+    impersonate: ImpersonateOpt = None,
+) -> None:
     """Resolve variables and validate agent.yaml (no GCP calls unless ${secret:}/${tf:} are used)."""
-    project, _ = _load(config, stage, param)
+    project, _ = _load(config, stage, param, impersonate)
     typer.secho(f"✔ {project.config_path.name} is valid for stage {project.stage}", fg=typer.colors.GREEN)
+    if identity := project.deployer.describe():
+        typer.echo(f"  deployer: {identity} (from {project.deployer.source})")
 
 
 @app.command("print")
 @handle_errors
-def print_(config: ConfigOpt = Path(DEFAULT_CONFIG_FILE), stage: StageOpt = None, param: ParamOpt = None) -> None:
+def print_(
+    config: ConfigOpt = Path(DEFAULT_CONFIG_FILE),
+    stage: StageOpt = None,
+    param: ParamOpt = None,
+    impersonate: ImpersonateOpt = None,
+) -> None:
     """Print agent.yaml with every variable resolved; secret values are masked."""
-    project, _ = _load(config, stage, param)
+    project, _ = _load(config, stage, param, impersonate)
 
     def mask(node: Any) -> Any:
         if isinstance(node, dict):
@@ -161,9 +202,10 @@ def package(
     stage: StageOpt = None,
     param: ParamOpt = None,
     output: Annotated[Path | None, typer.Option("--output", "-o", help="Also write a reproducible .tar.gz.")] = None,
+    impersonate: ImpersonateOpt = None,
 ) -> None:
     """List the files that would be uploaded and their content hash (offline)."""
-    project, pm = _load(config, stage, param)
+    project, pm = _load(config, stage, param, impersonate)
     pkg = _provider(project, pm).package()
     for f in pkg.files:
         typer.echo(f"  {f}")
@@ -182,9 +224,10 @@ def plan(
     code_only: Annotated[bool, typer.Option("--code-only", help="Only push code; defer config changes.")] = False,
     allow_replace: Annotated[bool, typer.Option("--allow-replace")] = False,
     detailed_exitcode: Annotated[bool, typer.Option(help="Exit 2 when there are changes (for CI).")] = False,
+    impersonate: ImpersonateOpt = None,
 ) -> None:
     """Show what `deploy` would change, without changing anything."""
-    project, pm = _load(config, stage, param)
+    project, pm = _load(config, stage, param, impersonate)
     _header(project, "Planning")
     _, changeset = _provider(project, pm).plan(DeployOptions(force, code_only, allow_replace))
     typer.echo(render(changeset, "Changes:"))
@@ -230,9 +273,10 @@ def deploy(
     ] = False,
     no_wait: Annotated[bool, typer.Option("--no-wait", help="Return once the engine operation has started.")] = False,
     status: Annotated[bool, typer.Option("--status", help="Check/finalize a --no-wait deployment.")] = False,
+    impersonate: ImpersonateOpt = None,
 ) -> None:
     """Reconcile GCP with agent.yaml: identity, IAM, engine, memory, networking, Gemini Enterprise."""
-    project, pm = _load(config, stage, param)
+    project, pm = _load(config, stage, param, impersonate)
     provider = _provider(project, pm)
     if status:
         if provider.status():
@@ -261,9 +305,10 @@ def info(
     stage: StageOpt = None,
     param: ParamOpt = None,
     as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output.")] = False,
+    impersonate: ImpersonateOpt = None,
 ) -> None:
     """Show what is deployed for a stage."""
-    project, pm = _load(config, stage, param)
+    project, pm = _load(config, stage, param, impersonate)
     data = _provider(project, pm).info()
     if as_json:
         typer.echo(json.dumps(data, indent=2))
@@ -290,9 +335,10 @@ def logs(
     since: Annotated[str, typer.Option(help="Look-back window, e.g. 30m, 2h, 1d.")] = "1h",
     severity: Annotated[str | None, typer.Option(help="Minimum severity, e.g. WARNING.")] = None,
     tail: Annotated[bool, typer.Option("--tail", "-t", help="Keep following new entries.")] = False,
+    impersonate: ImpersonateOpt = None,
 ) -> None:
     """Print the engine's Cloud Logging entries."""
-    project, pm = _load(config, stage, param)
+    project, pm = _load(config, stage, param, impersonate)
     match = re.fullmatch(r"(\d+)([smhd])", since)
     if not match:
         raise ConfigError("--since expects <number><s|m|h|d>")
@@ -304,6 +350,7 @@ def logs(
         severity=severity,
         tail=tail,
         echo=typer.echo,
+        credentials=project.deployer.credentials(),
     )
 
 
@@ -317,9 +364,10 @@ def invoke(
     session: Annotated[str | None, typer.Option(help="Reuse a session id.")] = None,
     user: Annotated[str, typer.Option(help="User id for the session.")] = "agentless-cli",
     raw: Annotated[bool, typer.Option(help="Print raw ADK events as JSON lines.")] = False,
+    impersonate: ImpersonateOpt = None,
 ) -> None:
     """Send a message to the deployed agent and stream its answer."""
-    project, pm = _load(config, stage, param)
+    project, pm = _load(config, stage, param, impersonate)
     cfg = project.config
     for event in ops.invoke(
         cfg.provider.region,
@@ -328,6 +376,7 @@ def invoke(
         user_id=user,
         session_id=session,
         project=cfg.provider.project,
+        credentials=project.deployer.credentials(),
     ):
         if "session_id" in event and len(event) == 1:
             typer.secho(f"session {event['session_id']}", dim=True)
@@ -342,10 +391,14 @@ def invoke(
 @app.command()
 @handle_errors
 def remove(
-    config: ConfigOpt = Path(DEFAULT_CONFIG_FILE), stage: StageOpt = None, param: ParamOpt = None, yes: YesOpt = False
+    config: ConfigOpt = Path(DEFAULT_CONFIG_FILE),
+    stage: StageOpt = None,
+    param: ParamOpt = None,
+    yes: YesOpt = False,
+    impersonate: ImpersonateOpt = None,
 ) -> None:
     """Delete everything agentless created for a stage; pre-existing resources are kept."""
-    project, pm = _load(config, stage, param)
+    project, pm = _load(config, stage, param, impersonate)
     _header(project, "Removing")
 
     def confirm(changeset: ChangeSet) -> bool:
@@ -366,10 +419,14 @@ def remove(
 @app.command()
 @handle_errors
 def unlock(
-    config: ConfigOpt = Path(DEFAULT_CONFIG_FILE), stage: StageOpt = None, param: ParamOpt = None, yes: YesOpt = False
+    config: ConfigOpt = Path(DEFAULT_CONFIG_FILE),
+    stage: StageOpt = None,
+    param: ParamOpt = None,
+    yes: YesOpt = False,
+    impersonate: ImpersonateOpt = None,
 ) -> None:
     """Release a stale deployment lock (only when no deploy is running)."""
-    project, pm = _load(config, stage, param)
+    project, pm = _load(config, stage, param, impersonate)
     provider = _provider(project, pm)
     if yes or typer.confirm(f"Force-unlock {provider.store.location}?", default=False):
         provider.store.force_unlock()

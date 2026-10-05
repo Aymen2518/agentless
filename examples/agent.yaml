@@ -10,14 +10,17 @@ provider:
   region: europe-west1                    # regional; 'global' is rejected
   stagingBucket: ${tf(gs://acme-terraform-state-${stage}/agents/foundation):staging_bucket}   # or a plain bucket name
   labels: { team: support, env: "${stage}" }   # agentless adds agentless-service / agentless-stage
+  deployer:                               # optional: act as this SA (caller needs roles/iam.serviceAccountTokenCreator)
+    impersonate: ${param:deployer}        # --impersonate-service-account / AGENTLESS_IMPERSONATE_SERVICE_ACCOUNT win
+    # delegates: [hop@acme-shared.iam.gserviceaccount.com]   # no ${secret:} / ${tf:} in this block
 
 stages:
   default:
     params: { minInstances: 0 }
   dev:
-    params: { project: acme-agents-dev }
+    params: { project: acme-agents-dev, deployer: sa-deployer@acme-agents-dev.iam.gserviceaccount.com }
   prod:
-    params: { project: acme-agents-prod, minInstances: 2 }
+    params: { project: acme-agents-prod, minInstances: 2, deployer: sa-deployer@acme-agents-prod.iam.gserviceaccount.com }
 
 agent:
   displayName: Support Agent (${stage})   # default: <service>-<stage>

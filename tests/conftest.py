@@ -49,3 +49,17 @@ def make_provider(agent_dir: Path, gcp: FakeGcp) -> Callable[..., AgentRuntimePr
         return AgentRuntimeProvider(project, hooks=plugin_manager(), clients=gcp, store=store, echo=lambda _: None)
 
     return make
+
+
+@pytest.fixture
+def fake_cli(monkeypatch: pytest.MonkeyPatch, gcp: FakeGcp, agent_dir: Path) -> Path:
+    """Route the CLI's provider to FakeGcp and a local store."""
+    from agentless import cli
+
+    def provider(project: Project, pm: object) -> AgentRuntimeProvider:
+        return AgentRuntimeProvider(
+            project, hooks=pm, clients=gcp, store=LocalStateStore(agent_dir, project.stage), echo=lambda _: None
+        )
+
+    monkeypatch.setattr(cli, "_provider", provider)
+    return agent_dir

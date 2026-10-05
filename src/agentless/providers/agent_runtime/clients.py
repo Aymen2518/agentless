@@ -10,6 +10,8 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
+from agentless.auth import Deployer
+
 _GE_REDIRECT_URI = "https://vertexaisearch.cloud.google.com/static/oauth/oauth.html"
 _IAM_RETRIES = 5
 
@@ -19,9 +21,14 @@ Binding = tuple[str, str]  # (role, member)
 class GcpClients:
     """Real GCP implementation; every SDK import is lazy to keep the CLI fast."""
 
-    def __init__(self, project: str, region: str):
+    def __init__(self, project: str, region: str, deployer: Deployer | None = None):
         self.project = project
         self.region = region
+        self.deployer = deployer or Deployer()
+
+    @functools.cached_property
+    def _credentials(self) -> Any:
+        return self.deployer.credentials()
 
     # --- project -------------------------------------------------------------------------------------------------
 
@@ -30,7 +37,8 @@ class GcpClients:
         """Numeric id of the target project."""
         from google.cloud import resourcemanager_v3
 
-        name = resourcemanager_v3.ProjectsClient().get_project(name=f"projects/{self.project}").name
+        client = resourcemanager_v3.ProjectsClient(credentials=self._credentials)
+        name = client.get_project(name=f"projects/{self.project}").name
         return name.split("/")[1]
 
     # --- service accounts ------------------------------------------------------------------------------------------
@@ -39,7 +47,7 @@ class GcpClients:
     def _iam_admin(self) -> Any:
         from google.cloud import iam_admin_v1
 
-        return iam_admin_v1.IAMClient()
+        return iam_admin_v1.IAMClient(credentials=self._credentials)
 
     def get_service_account(self, email: str) -> dict[str, Any] | None:
         """Service account by email, or None."""
@@ -97,11 +105,11 @@ class GcpClients:
 
     def _iam_members(self, rtype: str, name: str) -> dict[str, set[str]]:
         if rtype == "bigqueryDataset":
-            return _bq_members(name, self.project)
+            return _bq_members(name, self.project, self._credentials)
         if rtype == "bucket":
-            policy = _bucket(name, self.project).get_iam_policy(requested_policy_version=3)
+            policy = _bucket(name, self.project, self._credentials).get_iam_policy(requested_policy_version=3)
             return {b["role"]: set(b["members"]) for b in policy.bindings if not b.get("condition")}
-        client, resource = _proto_iam(rtype, name, self.project)
+        client, resource = _proto_iam(rtype, name, self.project, self._credentials)
         policy = client.get_iam_policy(request={"resource": resource, "options": {"requested_policy_version": 3}})
         return {b.role: set(b.members) for b in policy.bindings if not b.condition.expression}
 
@@ -111,12 +119,12 @@ class GcpClients:
         if not add and not remove:
             return
         if rtype == "bigqueryDataset":
-            _bq_modify(name, add, remove, self.project)
+            _bq_modify(name, add, remove, self.project, self._credentials)
             return
         if rtype == "bucket":
-            _retry(lambda: _bucket_modify(name, add, remove, self.project))
+            _retry(lambda: _bucket_modify(name, add, remove, self.project, self._credentials))
             return
-        client, resource = _proto_iam(rtype, name, self.project)
+        client, resource = _proto_iam(rtype, name, self.project, self._credentials)
 
         def attempt() -> None:
             policy = client.get_iam_policy(request={"resource": resource, "options": {"requested_policy_version": 3}})
@@ -146,7 +154,12 @@ class GcpClients:
         except ImportError:  # SDKs older than the agentplatform rename
             from vertexai import Client
 
-        return Client(project=self.project, location=self.region, http_options={"api_version": "v1beta1"})
+        return Client(
+            project=self.project,
+            location=self.region,
+            credentials=self._credentials,
+            http_options={"api_version": "v1beta1"},
+        )
 
     def engine_get(self, name: str) -> dict[str, Any] | None:
         """Engine summary, or None when it no longer exists."""
@@ -244,11 +257,9 @@ class GcpClients:
 
     @functools.cached_property
     def _http(self) -> Any:
-        import google.auth
         from google.auth.transport.requests import AuthorizedSession
 
-        credentials, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
-        session = AuthorizedSession(credentials)
+        session = AuthorizedSession(self._credentials)
         session.headers["X-Goog-User-Project"] = self.project
         return session
 
@@ -335,28 +346,30 @@ def _ge_base(resource: str) -> str:
     )
 
 
-def _proto_iam(rtype: str, name: str, project: str) -> tuple[Any, str]:
+def _proto_iam(rtype: str, name: str, project: str, credentials: Any) -> tuple[Any, str]:
     if rtype == "project":
         from google.cloud import resourcemanager_v3
 
-        return resourcemanager_v3.ProjectsClient(), f"projects/{name}"
+        return resourcemanager_v3.ProjectsClient(credentials=credentials), f"projects/{name}"
     if rtype == "folder":
         from google.cloud import resourcemanager_v3
 
-        return resourcemanager_v3.FoldersClient(), f"folders/{name.removeprefix('folders/')}"
+        return resourcemanager_v3.FoldersClient(credentials=credentials), f"folders/{name.removeprefix('folders/')}"
     if rtype == "organization":
         from google.cloud import resourcemanager_v3
 
-        return resourcemanager_v3.OrganizationsClient(), f"organizations/{name.removeprefix('organizations/')}"
+        return resourcemanager_v3.OrganizationsClient(
+            credentials=credentials
+        ), f"organizations/{name.removeprefix('organizations/')}"
     if rtype == "secret":
         from google.cloud import secretmanager
 
         resource = name if name.startswith("projects/") else f"projects/{project}/secrets/{name}"
-        return secretmanager.SecretManagerServiceClient(), resource
+        return secretmanager.SecretManagerServiceClient(credentials=credentials), resource
     if rtype == "serviceAccount":
         from google.cloud import iam_admin_v1
 
-        return iam_admin_v1.IAMClient(), f"projects/-/serviceAccounts/{name}"
+        return iam_admin_v1.IAMClient(credentials=credentials), f"projects/-/serviceAccounts/{name}"
     raise ValueError(f"unsupported IAM resource type {rtype}")
 
 
@@ -375,14 +388,14 @@ def _retry(fn: Callable[[], None]) -> None:
             time.sleep(2**attempt)
 
 
-def _bucket(name: str, project: str) -> Any:
+def _bucket(name: str, project: str, credentials: Any) -> Any:
     from google.cloud import storage
 
-    return storage.Client(project=project).bucket(name.removeprefix("gs://"))
+    return storage.Client(project=project, credentials=credentials).bucket(name.removeprefix("gs://"))
 
 
-def _bucket_modify(name: str, add: list[Binding], remove: list[Binding], project: str) -> None:
-    bucket = _bucket(name, project)
+def _bucket_modify(name: str, add: list[Binding], remove: list[Binding], project: str, credentials: Any) -> None:
+    bucket = _bucket(name, project, credentials)
     policy = bucket.get_iam_policy(requested_policy_version=3)
     for role, member in add:
         binding = next((b for b in policy.bindings if b["role"] == role and not b.get("condition")), None)
@@ -423,10 +436,10 @@ def _bq_entity(member: str) -> tuple[str, str]:
     return "iamMember", member
 
 
-def _bq_members(name: str, project: str) -> dict[str, set[str]]:
+def _bq_members(name: str, project: str, credentials: Any) -> dict[str, set[str]]:
     from google.cloud import bigquery
 
-    dataset = bigquery.Client(project=project).get_dataset(_bq_split(name))
+    dataset = bigquery.Client(project=project, credentials=credentials).get_dataset(_bq_split(name))
     members: dict[str, set[str]] = {}
     for entry in dataset.access_entries:
         if not entry.role:
@@ -439,10 +452,10 @@ def _bq_members(name: str, project: str) -> dict[str, set[str]]:
     return members
 
 
-def _bq_modify(name: str, add: list[Binding], remove: list[Binding], project: str) -> None:
+def _bq_modify(name: str, add: list[Binding], remove: list[Binding], project: str, credentials: Any) -> None:
     from google.cloud import bigquery
 
-    client = bigquery.Client(project=project)
+    client = bigquery.Client(project=project, credentials=credentials)
     dataset = client.get_dataset(_bq_split(name))
     entries = list(dataset.access_entries)
     for role, member in remove:

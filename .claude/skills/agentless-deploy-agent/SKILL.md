@@ -71,6 +71,8 @@ Always show the user the plan and get an explicit go-ahead before running `deplo
 | `… is locked by …` | another deploy is running; if it's stale, run `agentless unlock` |
 | ✋ `N engines share this display name` | set `agent.displayName` to something unique |
 | `variable error at stages.<x>…` | an env var or param that the chosen stage needs is missing; other stages are never resolved |
+| `iam.serviceAccounts.getAccessToken` denied | impersonation: the caller needs `roles/iam.serviceAccountTokenCreator` on `provider.deployer.impersonate` (and on each delegate) |
+| plan header shows the wrong `as …` | precedence is `--impersonate-service-account` > `AGENTLESS_IMPERSONATE_SERVICE_ACCOUNT` > `provider.deployer`; `agentless validate` prints which one won |
 | 403 during apply | the deployer is missing roles (see the README "Permissions" table); state is kept, so fix it and rerun |
 | `partial remove, still tracked: …` | some revokes or deletes failed; fix permissions and rerun `remove` |
 | plan shows `~ source … (rebuild)` with no code change | the `.gcloudignore` or packaged file set changed; that's expected once |
