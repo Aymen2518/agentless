@@ -1,0 +1,818 @@
+{
+  "$defs": {
+    "Agent": {
+      "additionalProperties": false,
+      "description": "The deployed agent itself.",
+      "properties": {
+        "displayName": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Displayname"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "source": {
+          "$ref": "#/$defs/Source"
+        },
+        "framework": {
+          "default": "google-adk",
+          "title": "Framework",
+          "type": "string"
+        },
+        "build": {
+          "$ref": "#/$defs/Build"
+        },
+        "runtime": {
+          "$ref": "#/$defs/Runtime"
+        },
+        "environment": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Environment",
+          "type": "object"
+        },
+        "secrets": {
+          "additionalProperties": {
+            "$ref": "#/$defs/SecretRef"
+          },
+          "title": "Secrets",
+          "type": "object"
+        },
+        "telemetry": {
+          "$ref": "#/$defs/Telemetry"
+        },
+        "encryption": {
+          "$ref": "#/$defs/Encryption"
+        }
+      },
+      "title": "Agent",
+      "type": "object"
+    },
+    "Authorization": {
+      "additionalProperties": false,
+      "description": "OAuth authorization used by Gemini Enterprise to call the agent on the user's behalf.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "clientId": {
+          "title": "Clientid",
+          "type": "string"
+        },
+        "clientSecret": {
+          "title": "Clientsecret",
+          "type": "string"
+        },
+        "scopes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Scopes",
+          "type": "array"
+        },
+        "authorizationUri": {
+          "default": "https://accounts.google.com/o/oauth2/v2/auth",
+          "title": "Authorizationuri",
+          "type": "string"
+        },
+        "tokenUri": {
+          "default": "https://oauth2.googleapis.com/token",
+          "title": "Tokenuri",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "clientId",
+        "clientSecret",
+        "scopes"
+      ],
+      "title": "Authorization",
+      "type": "object"
+    },
+    "Build": {
+      "additionalProperties": false,
+      "description": "Container build settings (sourceCodeSpec.imageSpec).",
+      "properties": {
+        "args": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Args",
+          "type": "object"
+        }
+      },
+      "title": "Build",
+      "type": "object"
+    },
+    "DnsPeering": {
+      "additionalProperties": false,
+      "description": "DNS peering for PSC-I.",
+      "properties": {
+        "domain": {
+          "title": "Domain",
+          "type": "string"
+        },
+        "targetProject": {
+          "title": "Targetproject",
+          "type": "string"
+        },
+        "targetNetwork": {
+          "title": "Targetnetwork",
+          "type": "string"
+        }
+      },
+      "required": [
+        "domain",
+        "targetProject",
+        "targetNetwork"
+      ],
+      "title": "DnsPeering",
+      "type": "object"
+    },
+    "Encryption": {
+      "additionalProperties": false,
+      "description": "Customer-managed encryption key.",
+      "properties": {
+        "kmsKey": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Kmskey"
+        }
+      },
+      "title": "Encryption",
+      "type": "object"
+    },
+    "GeminiEnterprise": {
+      "additionalProperties": false,
+      "description": "Gemini Enterprise registration.",
+      "properties": {
+        "app": {
+          "pattern": "^projects/[^/]+/locations/[^/]+/collections/[^/]+/engines/[^/]+$",
+          "title": "App",
+          "type": "string"
+        },
+        "displayName": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Displayname"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "toolDescription": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tooldescription"
+        },
+        "authorization": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Authorization"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "app"
+      ],
+      "title": "GeminiEnterprise",
+      "type": "object"
+    },
+    "Identity": {
+      "additionalProperties": false,
+      "description": "Who the agent runs as and what it may access.",
+      "properties": {
+        "type": {
+          "$ref": "#/$defs/IdentityType",
+          "default": "serviceAccount"
+        },
+        "serviceAccount": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ServiceAccount"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "roles": {
+          "$ref": "#/$defs/Roles"
+        }
+      },
+      "title": "Identity",
+      "type": "object"
+    },
+    "IdentityType": {
+      "description": "Runtime identity of the agent.",
+      "enum": [
+        "platform",
+        "serviceAccount",
+        "agentIdentity"
+      ],
+      "title": "IdentityType",
+      "type": "string"
+    },
+    "Memory": {
+      "additionalProperties": false,
+      "description": "Sessions and long-term memory.",
+      "properties": {
+        "sessions": {
+          "default": "agentPlatform",
+          "enum": [
+            "agentPlatform",
+            "inMemory"
+          ],
+          "title": "Sessions",
+          "type": "string"
+        },
+        "artifactsBucket": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "GCS bucket for ADK artifacts (LOGS_BUCKET_NAME).",
+          "title": "Artifactsbucket"
+        },
+        "memoryBank": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MemoryBank"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "Memory",
+      "type": "object"
+    },
+    "MemoryBank": {
+      "additionalProperties": false,
+      "description": "Memory Bank (contextSpec.memoryBankConfig).",
+      "properties": {
+        "generationModel": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Generationmodel"
+        },
+        "embeddingModel": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Embeddingmodel"
+        },
+        "ttl": {
+          "anyOf": [
+            {
+              "pattern": "^\\d+(\\.\\d+)?s$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ttl"
+        },
+        "topics": {
+          "description": "Managed memory topics, e.g. USER_PREFERENCES.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Topics",
+          "type": "array"
+        },
+        "disableMemoryRevisions": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Disablememoryrevisions"
+        }
+      },
+      "title": "MemoryBank",
+      "type": "object"
+    },
+    "Network": {
+      "additionalProperties": false,
+      "description": "Private networking for the agent.",
+      "properties": {
+        "pscInterface": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PscInterface"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "Network",
+      "type": "object"
+    },
+    "OrganizationRoles": {
+      "additionalProperties": false,
+      "description": "Org-level roles; usually need an org admin to apply.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "roles": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Roles",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "roles"
+      ],
+      "title": "OrganizationRoles",
+      "type": "object"
+    },
+    "Provider": {
+      "additionalProperties": false,
+      "description": "Where and how the agent is deployed.",
+      "properties": {
+        "name": {
+          "const": "agent-runtime",
+          "default": "agent-runtime",
+          "title": "Name",
+          "type": "string"
+        },
+        "stage": {
+          "default": "dev",
+          "title": "Stage",
+          "type": "string"
+        },
+        "project": {
+          "title": "Project",
+          "type": "string"
+        },
+        "region": {
+          "title": "Region",
+          "type": "string"
+        },
+        "stagingBucket": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Bucket holding agentless state, without gs://.",
+          "title": "Stagingbucket"
+        },
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Labels",
+          "type": "object"
+        }
+      },
+      "required": [
+        "project",
+        "region"
+      ],
+      "title": "Provider",
+      "type": "object"
+    },
+    "PscInterface": {
+      "additionalProperties": false,
+      "description": "Private Service Connect interface (create-time only).",
+      "properties": {
+        "networkAttachment": {
+          "title": "Networkattachment",
+          "type": "string"
+        },
+        "dnsPeering": {
+          "items": {
+            "$ref": "#/$defs/DnsPeering"
+          },
+          "title": "Dnspeering",
+          "type": "array"
+        }
+      },
+      "required": [
+        "networkAttachment"
+      ],
+      "title": "PscInterface",
+      "type": "object"
+    },
+    "Publish": {
+      "additionalProperties": false,
+      "description": "Post-deploy publication targets.",
+      "properties": {
+        "geminiEnterprise": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GeminiEnterprise"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "Publish",
+      "type": "object"
+    },
+    "ResourceRoles": {
+      "additionalProperties": false,
+      "description": "Roles granted on a single resource.",
+      "properties": {
+        "type": {
+          "enum": [
+            "project",
+            "folder",
+            "organization",
+            "bucket",
+            "secret",
+            "serviceAccount",
+            "bigqueryDataset"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "name": {
+          "description": "Resource id: bucket name, secret id, SA email, `project:dataset`, folder id\u2026",
+          "title": "Name",
+          "type": "string"
+        },
+        "roles": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Roles",
+          "type": "array"
+        }
+      },
+      "required": [
+        "type",
+        "name",
+        "roles"
+      ],
+      "title": "ResourceRoles",
+      "type": "object"
+    },
+    "Roles": {
+      "additionalProperties": false,
+      "description": "Least-privilege grants for the agent's identity.",
+      "properties": {
+        "project": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Project",
+          "type": "array"
+        },
+        "organization": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OrganizationRoles"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "resources": {
+          "items": {
+            "$ref": "#/$defs/ResourceRoles"
+          },
+          "title": "Resources",
+          "type": "array"
+        }
+      },
+      "title": "Roles",
+      "type": "object"
+    },
+    "Runtime": {
+      "additionalProperties": false,
+      "description": "Scaling and sizing (spec.deploymentSpec).",
+      "properties": {
+        "cpu": {
+          "default": "1",
+          "title": "Cpu",
+          "type": "string"
+        },
+        "memory": {
+          "default": "4Gi",
+          "title": "Memory",
+          "type": "string"
+        },
+        "minInstances": {
+          "default": 1,
+          "maximum": 10,
+          "minimum": 0,
+          "title": "Mininstances",
+          "type": "integer"
+        },
+        "maxInstances": {
+          "default": 10,
+          "maximum": 1000,
+          "minimum": 1,
+          "title": "Maxinstances",
+          "type": "integer"
+        },
+        "concurrency": {
+          "default": 8,
+          "minimum": 1,
+          "title": "Concurrency",
+          "type": "integer"
+        },
+        "serverMode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ServerMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "Runtime",
+      "type": "object"
+    },
+    "SecretRef": {
+      "additionalProperties": false,
+      "description": "Secret Manager reference exposed as an env var.",
+      "properties": {
+        "secret": {
+          "title": "Secret",
+          "type": "string"
+        },
+        "version": {
+          "default": "latest",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "secret"
+      ],
+      "title": "SecretRef",
+      "type": "object"
+    },
+    "ServerMode": {
+      "description": "Agent server mode on Agent Runtime.",
+      "enum": [
+        "STABLE",
+        "EXPERIMENTAL"
+      ],
+      "title": "ServerMode",
+      "type": "string"
+    },
+    "ServiceAccount": {
+      "additionalProperties": false,
+      "description": "Runtime service account: created by agentless or pre-existing.",
+      "properties": {
+        "create": {
+          "default": true,
+          "title": "Create",
+          "type": "boolean"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Account ID when create=true.",
+          "title": "Name"
+        },
+        "displayName": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Displayname"
+        },
+        "email": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Existing account email when create=false.",
+          "title": "Email"
+        }
+      },
+      "title": "ServiceAccount",
+      "type": "object"
+    },
+    "Source": {
+      "additionalProperties": false,
+      "description": "Location of the agents-cli project to package.",
+      "properties": {
+        "path": {
+          "default": ".",
+          "title": "Path",
+          "type": "string"
+        },
+        "agentDirectory": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Agentdirectory"
+        }
+      },
+      "title": "Source",
+      "type": "object"
+    },
+    "StageConfig": {
+      "additionalProperties": false,
+      "description": "Per-stage overrides, read through `${param:...}`.",
+      "properties": {
+        "params": {
+          "additionalProperties": true,
+          "title": "Params",
+          "type": "object"
+        }
+      },
+      "title": "StageConfig",
+      "type": "object"
+    },
+    "Telemetry": {
+      "additionalProperties": false,
+      "description": "Telemetry toggles mapped to the env vars agents-cli sets.",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "captureMessageContent": {
+          "default": false,
+          "title": "Capturemessagecontent",
+          "type": "boolean"
+        }
+      },
+      "title": "Telemetry",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Root of `agent.yaml`.",
+  "properties": {
+    "service": {
+      "pattern": "^[a-z][a-z0-9-]{0,62}$",
+      "title": "Service",
+      "type": "string"
+    },
+    "frameworkVersion": {
+      "default": "1",
+      "title": "Frameworkversion",
+      "type": "string"
+    },
+    "provider": {
+      "$ref": "#/$defs/Provider"
+    },
+    "stages": {
+      "additionalProperties": {
+        "$ref": "#/$defs/StageConfig"
+      },
+      "title": "Stages",
+      "type": "object"
+    },
+    "agent": {
+      "$ref": "#/$defs/Agent"
+    },
+    "identity": {
+      "$ref": "#/$defs/Identity"
+    },
+    "network": {
+      "$ref": "#/$defs/Network"
+    },
+    "memory": {
+      "$ref": "#/$defs/Memory"
+    },
+    "publish": {
+      "$ref": "#/$defs/Publish"
+    },
+    "custom": {
+      "additionalProperties": true,
+      "title": "Custom",
+      "type": "object"
+    }
+  },
+  "required": [
+    "service",
+    "provider"
+  ],
+  "title": "AgentConfig",
+  "type": "object"
+}

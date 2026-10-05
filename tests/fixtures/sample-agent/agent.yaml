@@ -1,0 +1,21 @@
+service: sample-agent
+provider:
+  stage: ${opt:stage, 'dev'}
+  project: ${param:project}
+  region: europe-west1
+  labels: { bu: plat, env: "${stage}" }
+stages:
+  dev: { params: { project: proj-dev } }
+  prod: { params: { project: proj-prod, minInstances: 2 } }
+agent:
+  description: Sample agent for ${self:service}
+  runtime: { minInstances: "${param:minInstances, 0}", maxInstances: 5 }
+  environment: { BUCKET: "bk-${stage}", DEBUG: false }
+  secrets: { TOKEN: { secret: tok } }
+identity:
+  type: serviceAccount
+  serviceAccount: { name: "sample-${stage}" }
+  roles:
+    project: [roles/aiplatform.user]
+    resources:
+      - { type: bucket, name: "bk-${stage}", roles: [roles/storage.objectViewer] }

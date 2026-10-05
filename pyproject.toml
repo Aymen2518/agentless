@@ -1,0 +1,73 @@
+[project]
+name = "agentless"
+version = "0.1.0"
+description = "Serverless-style declarative deployment of ADK agents to Google Cloud Agent Platform (Agent Runtime)."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "agentless contributors" }]
+keywords = ["adk", "agents", "agent-engine", "vertex-ai", "google-cloud", "serverless", "deployment", "iac"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: System :: Systems Administration",
+]
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "typer>=0.15",
+    "pydantic>=2.10",
+    "pyyaml>=6.0",
+    "pathspec>=1.0",
+    "pluggy>=1.5",
+    "google-auth>=2.38",
+    "requests>=2.32",
+    "google-cloud-aiplatform[agent-engines]>=1.163.0,<2",
+    "google-cloud-resource-manager>=1.14",
+    "google-cloud-iam>=2.18",
+    "google-cloud-secret-manager>=2.23",
+    "google-cloud-storage>=2.19",
+    "google-cloud-bigquery>=3.27",
+    "google-cloud-logging>=3.11",
+]
+
+[project.urls]
+Homepage = "https://github.com/OWNER/agentless"
+Issues = "https://github.com/OWNER/agentless/issues"
+
+[project.scripts]
+agentless = "agentless.cli:app"
+
+[dependency-groups]
+dev = ["pytest>=8.3", "ruff>=0.9", "ty>=0.0.1a1"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agentless"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+extend-select = ["I", "D", "B", "UP"]
+extend-ignore = ["D100", "D104", "D105", "D107"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"

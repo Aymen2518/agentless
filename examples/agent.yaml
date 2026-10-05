@@ -1,0 +1,80 @@
+# yaml-language-server: $schema=../schema/agent.schema.json
+# Full reference: every block agentless understands. Only service, provider.project and provider.region are required.
+service: support-agent                    # lowercase, unique per project; state and default display name derive from it
+frameworkVersion: "1"
+
+provider:
+  name: agent-runtime                     # only target in v1
+  stage: ${opt:stage, 'dev'}              # `--stage` always wins
+  project: ${param:project}
+  region: europe-west1                    # regional; 'global' is rejected
+  stagingBucket: ${tf(gs://acme-terraform-state-${stage}/agents/foundation):staging_bucket}   # or a plain bucket name
+  labels: { team: support, env: "${stage}" }   # agentless adds agentless-service / agentless-stage
+
+stages:
+  default:
+    params: { minInstances: 0 }
+  dev:
+    params: { project: acme-agents-dev }
+  prod:
+    params: { project: acme-agents-prod, minInstances: 2 }
+
+agent:
+  displayName: Support Agent (${stage})   # default: <service>-<stage>
+  description: Answers internal support questions
+  source: { path: ., agentDirectory: app }  # defaults come from agents-cli-manifest.yaml
+  framework: google-adk
+  build: { args: { PIP_INDEX_URL: "${env:PIP_INDEX_URL, 'https://pypi.org/simple'}" } }
+  runtime:
+    cpu: "2"
+    memory: 4Gi
+    minInstances: ${param:minInstances}
+    maxInstances: 20
+    concurrency: 8
+    serverMode: STABLE
+  environment:
+    TICKETS_API: https://tickets.internal.example.com
+    FEATURE_X: true                        # booleans/numbers become strings
+  secrets:
+    TICKETS_TOKEN: { secret: tickets-api-token, version: latest }   # secretAccessor is granted automatically
+  telemetry: { enabled: true, captureMessageContent: false }
+  encryption: { kmsKey: null }             # CMEK; immutable, change needs --allow-replace
+
+identity:
+  type: serviceAccount                     # platform (default service agent) | serviceAccount | agentIdentity
+  serviceAccount: { create: true, name: "sa-support-${stage}" }   # or { create: false, email: x@y.iam.gserviceaccount.com }
+  roles:
+    project: [roles/aiplatform.user, roles/logging.logWriter, roles/cloudtrace.agent,
+              roles/serviceusage.serviceUsageConsumer]
+    resources:
+      - { type: bigqueryDataset, name: "acme-agents-${stage}:support_kb", roles: [roles/bigquery.dataViewer] }
+      - { type: bucket, name: "acme-support-docs-${stage}", roles: [roles/storage.objectViewer] }
+      - { type: secret, name: other-secret, roles: [roles/secretmanager.secretAccessor] }
+
+network:
+  pscInterface:                            # create-time only; changing it needs --allow-replace
+    networkAttachment: projects/<host-project>/regions/europe-west1/networkAttachments/<attachment>
+    dnsPeering:
+      - { domain: internal.example.com., targetProject: <host-project>, targetNetwork: <vpc> }
+
+memory:
+  sessions: agentPlatform                  # agentPlatform (default on Agent Runtime) | inMemory
+  artifactsBucket: acme-support-artifacts-${stage}   # LOGS_BUCKET_NAME, objectUser granted automatically
+  memoryBank:
+    generationModel: gemini-2.5-flash
+    embeddingModel: text-embedding-005
+    ttl: 2592000s
+    topics: [USER_PREFERENCES, KEY_CONVERSATION_DETAILS]
+
+publish:
+  geminiEnterprise:
+    app: projects/<number>/locations/global/collections/default_collection/engines/<app-id>
+    displayName: Support
+    toolDescription: Answers internal support questions using the ticket base
+    authorization:                         # OAuth so the agent acts as the end user
+      id: support-agent-oauth
+      clientId: ${secret:support-oauth-client-id}
+      clientSecret: ${secret:support-oauth-client-secret}
+      scopes: [https://www.googleapis.com/auth/cloud-platform]
+
+custom: {}                                 # free-form, read by plugins

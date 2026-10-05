@@ -1,0 +1,22 @@
+# yaml-language-server: $schema=../schema/agent.schema.json
+# Smallest useful config: one stage, a dedicated service account, a few project roles.
+service: hello-agent
+
+provider:
+  project: my-gcp-project
+  region: europe-west1
+
+agent:
+  description: A minimal ADK agent deployed with agentless
+  environment:
+    LOG_LEVEL: info
+
+identity:
+  type: serviceAccount
+  serviceAccount:
+    name: hello-agent-${stage}
+  roles:
+    project:
+      - roles/aiplatform.user
+      - roles/logging.logWriter
+      - roles/cloudtrace.agent
