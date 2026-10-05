@@ -388,8 +388,8 @@ def schema(output: Annotated[Path | None, typer.Option("--output", "-o")] = None
         typer.echo(text)
 
 
-# Published JSON Schema for IDE completion; replace OWNER once the repository is public.
-SCHEMA_URL = "https://raw.githubusercontent.com/OWNER/agentless/main/schema/agent.schema.json"
+# Published JSON Schema for IDE completion, served by the docs site.
+SCHEMA_URL = "https://aymen2518.github.io/agentless/schema/agent.schema.json"
 
 INIT_TEMPLATE = """\
 # yaml-language-server: $schema={schema_url}

@@ -63,4 +63,5 @@
 - [x] remove organisation-specific references (projects, naming, internal repos) from code, docs, examples, skills
 - [x] Apache-2.0 LICENSE, pyproject metadata, CONTRIBUTING.md
 - [x] CLI container image (Dockerfile) + GitHub workflows (CI, release to ghcr.io)
-- [ ] create the GitHub repo, replace `OWNER` placeholders, tag `v0.1.0`
+- [x] create the GitHub repo and fill in the repository-owner placeholders
+- [ ] publish to PyPI as `agentless-cli` and tag `v0.1.0`

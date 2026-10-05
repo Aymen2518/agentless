@@ -10,8 +10,8 @@ Agent Runtime engine, Memory Bank, PSC-I and Gemini Enterprise. agents-cli is st
 evaluating the agent. Field reference: `examples/agent.yaml` in the agentless repo. Smallest
 starting point: `examples/minimal.yaml`.
 
-Check the tool is installed with `agentless version`. If it's missing, run
-`uv tool install --editable <agentless checkout>`.
+Check the tool is installed with `agentless version`. If it's missing, run `uv tool install agentless-cli`
+(or `pipx install agentless-cli`, or use the image `docker run --rm ghcr.io/Aymen2518/agentless`).
 
 ## Workflow
 
@@ -23,7 +23,7 @@ Check the tool is installed with `agentless version`. If it's missing, run
      `cloudtrace`, `serviceusage`, `secretmanager` (if you use secrets), plus whatever the agent itself calls.
    - Data resources the agent uses (buckets, datasets, secrets) **already exist**. agentless grants access to them
      but never creates them, and the plan blocks if one is missing.
-2. **Write `agent.yaml`.** Run `agentless init --project <dev-project>`, or copy the pilot and adapt it:
+2. **Write `agent.yaml`.** Run `agentless init --project <dev-project>`, or copy `examples/agent.yaml` and adapt it:
    - **`stages.<stage>.params.project`:** one GCP project per stage. Try a sandbox project before shared ones.
    - **`identity`:** prefer `type: serviceAccount` with `create: true` and a name like `sa-<agent>-${stage}`
      (6–30 characters). Use `agentIdentity` only if you need a per-agent principal; it's a preview feature.
