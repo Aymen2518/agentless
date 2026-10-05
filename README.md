@@ -100,6 +100,39 @@ The package is named `agentless-cli`; the command it installs is `agentless`. Th
 Auth uses Application Default Credentials: `gcloud auth application-default login` locally, Workload Identity
 Federation in CI.
 
+### Deploying as a service account
+
+agentless can make every GCP call as a deployer service account instead of your own identity. That includes
+`${secret:}` and `${tf:}` reads, the state bucket, `logs` and `invoke`. It uses the first of these that is set:
+
+1. `--impersonate-service-account SA_EMAIL` on the command line
+2. the `AGENTLESS_IMPERSONATE_SERVICE_ACCOUNT` environment variable
+3. `provider.deployer` in `agent.yaml`
+4. otherwise, plain ADC
+
+```yaml
+provider:
+  project: ${param:project}
+  deployer:
+    impersonate: ${param:deployer}          # one deployer per stage
+    # delegates: [hop@acme-shared.iam.gserviceaccount.com]
+stages:
+  dev:  { params: { project: acme-agents-dev,  deployer: sa-deployer@acme-agents-dev.iam.gserviceaccount.com } }
+  prod: { params: { project: acme-agents-prod, deployer: sa-deployer@acme-agents-prod.iam.gserviceaccount.com } }
+```
+
+- **Grant:** whoever runs agentless (you, or the CI identity) needs `roles/iam.serviceAccountTokenCreator` on the
+  deployer service account, and on each delegate in a chain. The deployer itself needs the roles under
+  [Permissions](#permissions).
+- **Chains:** the flag and the env var take gcloud's form, `hop@…,target@…`, which impersonates the last account
+  through the others. In YAML, use `delegates:`.
+- **No GCP reads in `provider.deployer`:** it's chosen before anything authenticates, so it can use `${param:}`,
+  `${opt:}`, `${env:}`, `${self:}` and `${file():}`, but not `${secret:}` or `${tf:}`.
+- **Visible:** `plan` and `deploy` print `as <deployer>` in their header, `validate` says where the setting came from,
+  and the state lock and `updatedBy` record it.
+- `gcloud config set auth/impersonate_service_account` only affects gcloud, not agentless.
+  `gcloud auth application-default login --impersonate-service-account=SA` works too, without any agentless setting.
+
 ## Quick start
 
 ```bash
@@ -163,7 +196,7 @@ identity:
 
 | Block | Purpose | Agent Runtime field |
 |---|---|---|
-| `provider` | project, region, stage, state bucket, labels | resource location, `labels` |
+| `provider` | project, region, stage, state bucket, labels, deployer to impersonate | resource location, `labels` |
 | `agent.runtime` | cpu, memory, min/max instances, concurrency, server mode | `spec.deploymentSpec.*` |
 | `agent.environment` / `agent.secrets` | env vars and Secret Manager refs | `deploymentSpec.env` / `secretEnv` |
 | `agent.build.args` | Docker build args | `sourceCodeSpec.imageSpec.buildArgs` |
@@ -253,7 +286,8 @@ needs prod's environment variables.
 | `unlock` | release a stale lock |
 | `schema [-o file]` | JSON Schema for `agent.yaml` |
 
-Common options: `-c/--config`, `-s/--stage`, `-p/--param key=value`.
+Common options: `-c/--config`, `-s/--stage`, `-p/--param key=value`, `--impersonate-service-account SA_EMAIL` (see
+[Deploying as a service account](#deploying-as-a-service-account)).
 
 Without a TTY (CI), `deploy` applies without asking, like `serverless deploy`. With a TTY it asks unless you pass
 `-y`; destructive plans default to "no".
@@ -262,7 +296,8 @@ Without a TTY (CI), `deploy` applies without asking, like `serverless deploy`. W
 
 | Principal | Roles |
 |---|---|
-| Deployer (your user, or a CI service account via Workload Identity Federation) | `roles/aiplatform.admin`, `roles/iam.serviceAccountAdmin`, `roles/iam.serviceAccountUser`, `roles/resourcemanager.projectIamAdmin`, `roles/storage.objectAdmin` on the state bucket, `roles/secretmanager.admin` (or `setIamPolicy`) on the agent's secrets, `roles/discoveryengine.editor` to publish. Org-level grants also need org IAM admin. Leave `identity.roles.organization` out until that's approved. |
+| Deployer (your user, a CI service account via Workload Identity Federation, or the impersonated `provider.deployer`) | `roles/aiplatform.admin`, `roles/iam.serviceAccountAdmin`, `roles/iam.serviceAccountUser`, `roles/resourcemanager.projectIamAdmin`, `roles/storage.objectAdmin` on the state bucket, `roles/secretmanager.admin` (or `setIamPolicy`) on the agent's secrets, `roles/discoveryengine.editor` to publish. Org-level grants also need org IAM admin. Leave `identity.roles.organization` out until that's approved. |
+| Caller, when impersonating a deployer | `roles/iam.serviceAccountTokenCreator` on the deployer SA (and on each delegate) |
 | Runtime SA | only what `identity.roles` lists, plus automatic secret and artifact grants |
 
 Data resources and API enablement belong to your infrastructure-as-code (for example a Terraform foundation

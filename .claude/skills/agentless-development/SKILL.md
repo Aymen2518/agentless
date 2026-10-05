@@ -36,7 +36,8 @@ safely.
 8. **Offline commands never authenticate.** `validate`, `print`, `package`, `schema` and `init` must not build GCP
    clients. `provider.clients` and `provider.store` are lazy `cached_property`s; keep new clients lazy too.
 9. **Every GCP call lives in `providers/<target>/clients.py`** and has a twin in `tests/fakes.py`. Resources never
-   import Google SDKs.
+   import Google SDKs. Every SDK client gets `credentials=` from the project's `Deployer` (`agentless/auth.py`), so
+   impersonation covers it; a guard test fails otherwise.
 10. **Engine updates are minimal.** Config fields go out with an `update_mask` built by `spec.api_payload`. Code
     (`source_code_spec`) is only sent when the source hash or the build args change. Fields fixed at creation
     (`IMMUTABLE_FIELDS`) force a blocked REPLACE unless `--allow-replace`. On a never-deployed engine (bare or
