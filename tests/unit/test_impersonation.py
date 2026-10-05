@@ -132,6 +132,28 @@ def test_invalid_yaml_deployer(agent_dir, with_deployer, deployer, message):
         load_project(agent_dir / "agent.yaml")
 
 
+@pytest.mark.parametrize("blank", ["", "   ", " , ", "\n"])
+def test_blank_flag_or_env_falls_back(agent_dir, with_deployer, monkeypatch, blank):
+    path = agent_dir / "agent.yaml"
+    monkeypatch.setenv(ENV_VAR, blank)
+    assert load_project(path, impersonate=blank).deployer == Deployer()
+    with_deployer({"impersonate": DEV_SA})
+    assert load_project(path, impersonate=blank).deployer.source == "agent.yaml"
+    monkeypatch.setenv(ENV_VAR, PROD_SA)
+    assert load_project(path, impersonate=blank).deployer.impersonate == PROD_SA
+
+
+@pytest.mark.parametrize("blank", ["", "  ", None])
+def test_blank_yaml_deployer_means_adc(agent_dir, with_deployer, blank):
+    with_deployer({"impersonate": blank})
+    assert load_project(agent_dir / "agent.yaml").deployer == Deployer()
+
+
+def test_unset_param_falls_back_to_adc(agent_dir, with_deployer):
+    with_deployer({"impersonate": "${param:deployer, null}"})
+    assert load_project(agent_dir / "agent.yaml").deployer == Deployer()
+
+
 def test_invalid_flag_is_a_config_error(agent_dir):
     with pytest.raises(ConfigError, match="not a service account"):
         load_project(agent_dir / "agent.yaml", impersonate="alice@example.com")

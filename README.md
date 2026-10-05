@@ -110,6 +110,9 @@ agentless can make every GCP call as a deployer service account instead of your 
 3. `provider.deployer` in `agent.yaml`
 4. otherwise, plain ADC
 
+All three are optional. An empty or blank value counts as not set, so CI templates can always pass an optional
+input through (`AGENTLESS_IMPERSONATE_SERVICE_ACCOUNT: ${{ inputs.deployer }}`) and get ADC when it's empty.
+
 ```yaml
 provider:
   project: ${param:project}

@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-05
+
+### Fixed
+- A blank `--impersonate-service-account`, `AGENTLESS_IMPERSONATE_SERVICE_ACCOUNT` or `provider.deployer.impersonate`
+  (empty, spaces, or only commas) now counts as not set and falls back to the next source and then ADC, instead of
+  failing with "is empty".
+
 ## [0.2.0] - 2026-10-05
 
 ### Added
@@ -48,7 +55,8 @@ First public release: wheel and sdist (`agentless-cli`) on the GitHub Release, a
 - Plugins through pluggy entry points in the `agentless` group.
 - Multi-arch container image and Claude Code skills for developing agentless and deploying agents with it.
 
-[Unreleased]: https://github.com/Aymen2518/agentless/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Aymen2518/agentless/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/Aymen2518/agentless/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Aymen2518/agentless/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/Aymen2518/agentless/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/Aymen2518/agentless/releases/tag/v0.1.0
