@@ -6,6 +6,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+- A blank `--impersonate-service-account`, `AGENTLESS_IMPERSONATE_SERVICE_ACCOUNT` or `provider.deployer.impersonate`
+  (empty, spaces, or only commas) now counts as not set and falls back to the next source and then ADC, instead of
+  failing with "is empty".
+
 ## [0.2.0] - 2026-10-05
 
 ### Added

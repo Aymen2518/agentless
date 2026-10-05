@@ -40,7 +40,7 @@ class DeployerConfig(_Model):
     @field_validator("impersonate")
     @classmethod
     def _sa_email(cls, v: str | None) -> str | None:
-        return check_service_account(v) if v else None
+        return check_service_account(v) if v and v.strip() else None
 
     @field_validator("delegates")
     @classmethod

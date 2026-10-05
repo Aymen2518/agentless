@@ -151,16 +151,21 @@ def _deployer(flag: str | None, resolver: Resolver) -> Deployer:
             f"  - provider.deployer.{'.'.join(map(str, err['loc'])) or '<root>'}: {err['msg']}" for err in e.errors()
         ]
         raise ConfigError("\n".join(["agent.yaml is invalid:", *lines])) from e
+    # A blank flag or env var means "not provided", so CI templates can always pass an optional input through.
     try:
-        if flag:
+        if flag and _given(flag):
             return Deployer.from_chain(flag, FLAG)
-        if os.environ.get(ENV_VAR):
-            return Deployer.from_chain(os.environ[ENV_VAR], ENV_VAR)
+        if (env := os.environ.get(ENV_VAR)) and _given(env):
+            return Deployer.from_chain(env, ENV_VAR)
     except ValueError as e:
         raise ConfigError(str(e)) from e
     if declared.impersonate:
         return Deployer(declared.impersonate, tuple(declared.delegates), "agent.yaml")
     return Deployer()
+
+
+def _given(value: str) -> bool:
+    return bool(value.replace(",", "").strip())
 
 
 def _check_agents_cli_project(config: AgentConfig, source_dir: Path, manifest: Manifest | None) -> None:
