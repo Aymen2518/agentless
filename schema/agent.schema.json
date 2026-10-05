@@ -124,6 +124,35 @@
       "title": "Build",
       "type": "object"
     },
+    "DeployerConfig": {
+      "additionalProperties": false,
+      "description": "Service account agentless impersonates for every GCP call (needs roles/iam.serviceAccountTokenCreator).",
+      "properties": {
+        "impersonate": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Deployer service account email. Overridden by --impersonate-service-account and AGENTLESS_IMPERSONATE_SERVICE_ACCOUNT. Cannot use ${secret:} or ${tf:}.",
+          "title": "Impersonate"
+        },
+        "delegates": {
+          "description": "Delegation chain, in order, when the caller cannot impersonate directly.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Delegates",
+          "type": "array"
+        }
+      },
+      "title": "DeployerConfig",
+      "type": "object"
+    },
     "DnsPeering": {
       "additionalProperties": false,
       "description": "DNS peering for PSC-I.",
@@ -458,6 +487,9 @@
           },
           "title": "Labels",
           "type": "object"
+        },
+        "deployer": {
+          "$ref": "#/$defs/DeployerConfig"
         }
       },
       "required": [
