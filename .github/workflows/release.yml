@@ -1,36 +1,173 @@
 name: release
 
+# v* tags publish a release (GitHub Release assets + versioned GHCR image); pushes to main publish the `edge` image.
 on:
   push:
     tags: ["v*"]
+    branches: [main]
 
 permissions:
   contents: read
-  packages: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type == 'branch' }}
 
 jobs:
-  image:
+  verify:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      minor: ${{ steps.version.outputs.minor }}
+      major: ${{ steps.version.outputs.major }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --frozen
+      - name: Tag matches agentless.__version__
+        id: version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="$(uv run --frozen python -c 'import agentless; print(agentless.__version__)')"
+          if [[ "$REF_TYPE" == "tag" ]]; then
+            if [[ "${TAG#v}" != "$version" ]]; then
+              echo "::error::tag $TAG does not match agentless.__version__ ($version)"; exit 1
+            fi
+            if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              prerelease=false
+            elif [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(a|b|rc)[0-9]+$ ]]; then
+              prerelease=true
+            else
+              echo "::error::$version is not X.Y.Z or X.Y.Z{a,b,rc}N"; exit 1
+            fi
+          else
+            prerelease=true
+          fi
+          IFS=. read -r major minor _ <<<"$version"
+          {
+            echo "version=$version"
+            echo "major=$major"
+            echo "minor=$major.$minor"
+            echo "prerelease=$prerelease"
+          } >>"$GITHUB_OUTPUT"
+          echo "version=$version prerelease=$prerelease ref=$REF_TYPE"
+      - run: uv run ruff check src tests
+      - run: uv run ruff format --check src tests
+      - run: uv run ty check src
+      - run: uv run pytest -q
+      - name: Release notes exist in CHANGELOG.md
+        if: github.ref_type == 'tag'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: bash .github/scripts/release-notes.sh "$VERSION"
+
+  build:
+    needs: verify
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv build
+      - name: Wheel installs and reports the tagged version
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          got="$(uvx --from "dist/agentless_cli-${VERSION}-py3-none-any.whl" agentless version)"
+          [[ "$got" == "$VERSION" ]] || { echo "::error::wheel reports $got, expected $VERSION"; exit 1; }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  image:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # Pre-releases get only their exact version; X.Y, X and latest move on final releases only.
       - id: meta
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
+          flavor: latest=false
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
-      - uses: docker/build-push-action@v6
+            type=raw,value=${{ needs.verify.outputs.version }},enable=${{ github.ref_type == 'tag' }}
+            type=raw,value=${{ needs.verify.outputs.minor }},enable=${{ github.ref_type == 'tag' && needs.verify.outputs.prerelease == 'false' }}
+            type=raw,value=${{ needs.verify.outputs.major }},enable=${{ github.ref_type == 'tag' && needs.verify.outputs.prerelease == 'false' }}
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' && needs.verify.outputs.prerelease == 'false' }}
+            type=raw,value=edge,enable=${{ github.ref_type == 'branch' }}
+            type=sha,prefix=sha-,format=short,enable=${{ github.ref_type == 'branch' }}
+      - id: push
+        uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          provenance: true
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - uses: sigstore/cosign-installer@v3
+      - name: Sign the image by digest (keyless)
+        env:
+          REPO: ${{ github.repository }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: cosign sign --yes "ghcr.io/${REPO,,}@${DIGEST}"
+
+  github-release:
+    needs: [verify, build, image]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Checksums
+        run: |
+          cp schema/agent.schema.json dist/
+          (cd dist && sha256sum -- * > ../SHA256SUMS) && mv SHA256SUMS dist/
+          cat dist/SHA256SUMS
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*
+      - name: Create or update the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.verify.outputs.version }}
+          PRERELEASE: ${{ needs.verify.outputs.prerelease }}
+        run: |
+          bash .github/scripts/release-notes.sh "$VERSION" > notes.md
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+            exit 0
+          fi
+          if [[ "$PRERELEASE" == "true" ]]; then kind=--prerelease; else kind=--latest; fi
+          gh release create "$TAG" dist/* --verify-tag --title "agentless $VERSION" --notes-file notes.md "$kind"
