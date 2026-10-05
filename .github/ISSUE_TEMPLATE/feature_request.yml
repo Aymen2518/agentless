@@ -1,0 +1,31 @@
+name: Feature request
+description: Suggest a new capability or an agent.yaml field.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and what gets in the way today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: How it could look in agent.yaml or on the command line.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Plugins, Terraform, agents-cli flags, workarounds...
+  - type: dropdown
+    id: contribute
+    attributes:
+      label: Would you open a PR for this?
+      options:
+        - "Yes"
+        - Maybe, with guidance
+        - "No"

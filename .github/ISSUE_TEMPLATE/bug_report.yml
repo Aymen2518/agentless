@@ -1,0 +1,58 @@
+name: Bug report
+description: Something in agentless doesn't work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please remove secrets, project numbers and anything private from logs and YAML.
+        Security problems go through a private advisory instead (see SECURITY.md).
+  - type: input
+    id: version
+    attributes:
+      label: agentless version
+      description: Output of `agentless version`.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How do you run it?
+      options:
+        - uv tool / pipx (agentless-cli)
+        - Container image (ghcr.io)
+        - GitHub Action
+        - GitLab component
+        - From source
+    validations:
+      required: true
+  - type: input
+    id: command
+    attributes:
+      label: Command
+      placeholder: agentless plan --stage dev
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Relevant agent.yaml (redacted)
+      render: yaml
+  - type: textarea
+    id: logs
+    attributes:
+      label: Output
+      description: The full command output.
+      render: text
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      placeholder: macOS 15, Python 3.12, google-cloud-aiplatform 1.163
