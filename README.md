@@ -200,7 +200,8 @@ needs prod's environment variables.
 
 1. **Load** `agent.yaml`, pick the stage, resolve variables, then validate (pydantic) against the agents-cli
    manifest. The target must be `agent_runtime` and the project needs a `Dockerfile`.
-2. **Package** the files exactly as agents-cli would (`.gcloudignore`, else `.gitignore`) and take their sha256.
+2. **Package** the files exactly as agents-cli would (`.gcloudignore`, else `.gitignore`; `.venv/`, `venv/`,
+   `__pycache__/` and `*.pyc` are always skipped) and take their sha256. Symlinks pointing outside the agent are rejected.
    `agent.yaml` and `deployment_metadata.json` don't count towards the hash. This step is offline.
 3. **Lock** the state object, then plan each resource against the state and the live GCP view:
    `serviceAccount` → `agentIdentity` → `iam` → `engine` → `geminiEnterprise`.

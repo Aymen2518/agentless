@@ -11,8 +11,18 @@ from pathlib import Path
 
 import pathspec
 
-# Same defaults and precedence as agents-cli: .gcloudignore, else .gitignore.
-_DEFAULT_IGNORES = (".git", ".gcloudignore", ".gitignore", ".agentless/")
+# Same precedence as agents-cli: .gcloudignore, else .gitignore. Local virtualenvs and bytecode are never part of
+# the build context, so they are skipped even without an ignore file (a later `!pattern` can re-include them).
+_DEFAULT_IGNORES = (
+    ".git",
+    ".gcloudignore",
+    ".gitignore",
+    ".agentless/",
+    ".venv/",
+    "venv/",
+    "__pycache__/",
+    "*.py[cod]",
+)
 _INCLUDE_DIRECTIVE = "#!include:"
 # Rewritten on every deploy, so excluded from the fingerprint (still uploaded, like agents-cli does).
 _UNHASHED = frozenset({"deployment_metadata.json"})
@@ -70,6 +80,7 @@ def collect(root: Path, exclude: tuple[str, ...] = ()) -> Package:
         for name in sorted(filenames):
             rel = (rel_dir / name).as_posix()
             if not spec.match_file(rel):
+                _check_link(root, rel)
                 files.append(rel)
     if "Dockerfile" not in files:
         raise PackageError("Dockerfile is missing or excluded by .gcloudignore/.gitignore")
@@ -80,6 +91,19 @@ def collect(root: Path, exclude: tuple[str, ...] = ()) -> Package:
         digest.update(b"\0")
         digest.update(hashlib.sha256((root / rel).read_bytes()).digest())
     return Package(root, tuple(files), digest.hexdigest())
+
+
+def _check_link(root: Path, rel: str) -> None:
+    """Reject symlinks the upload can't follow: broken ones and ones pointing outside `root`."""
+    path = root / rel
+    if not path.is_symlink():
+        return
+    target = path.resolve()
+    if not target.exists() or not target.is_relative_to(root.resolve()):
+        raise PackageError(
+            f"{rel} is a symlink to {target}, outside the agent directory. "
+            "Add it (or its folder) to .gcloudignore, or replace it with a real file."
+        )
 
 
 def write_archive(package: Package, dest: Path) -> Path:
