@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-05
+
 ### Fixed
 - Packaging skips `.venv/`, `venv/`, `__pycache__/` and `*.pyc` even when the agent has no `.gcloudignore` or
   `.gitignore`. Before, a local virtualenv was uploaded and the deploy failed on its interpreter symlink. Agents
@@ -36,5 +38,6 @@ First public release: wheel and sdist (`agentless-cli`) on the GitHub Release, a
 - Plugins through pluggy entry points in the `agentless` group.
 - Multi-arch container image and Claude Code skills for developing agentless and deploying agents with it.
 
-[Unreleased]: https://github.com/Aymen2518/agentless/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Aymen2518/agentless/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/Aymen2518/agentless/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/Aymen2518/agentless/releases/tag/v0.1.0
