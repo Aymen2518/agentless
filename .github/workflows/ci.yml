@@ -24,6 +24,11 @@ jobs:
       - run: uv run ruff format --check src tests
       - run: uv run ty check src
       - run: uv run pytest -q
+      - name: Committed JSON schema matches the config model
+        run: |
+          uv run agentless schema -o "$RUNNER_TEMP/agent.schema.json"
+          diff -u schema/agent.schema.json "$RUNNER_TEMP/agent.schema.json" \
+            || { echo "::error::schema/agent.schema.json is stale; run 'uv run agentless schema -o schema/agent.schema.json'"; exit 1; }
 
   image:
     runs-on: ubuntu-latest
