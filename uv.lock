@@ -7,8 +7,7 @@ resolution-markers = [
 ]
 
 [[package]]
-name = "agentless"
-version = "0.1.0"
+name = "agentless-cli"
 source = { editable = "." }
 dependencies = [
     { name = "google-auth" },
