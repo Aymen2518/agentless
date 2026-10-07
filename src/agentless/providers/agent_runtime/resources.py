@@ -26,6 +26,11 @@ def service_account_email(ctx: Context) -> str | None:
     return sa.email if not sa.create else f"{sa.name}@{ctx.project.config.provider.project}.iam.gserviceaccount.com"
 
 
+def agent_principal(identity: str | None) -> str | None:
+    """The identity if it is an Agent Identity principal; None for the SA email a service-account engine reports."""
+    return identity if identity and ".system.id.goog/" in identity else None
+
+
 def runtime_member(ctx: Context) -> str | None:
     """IAM member the agent runs as; None while an Agent Identity principal does not exist yet."""
     identity_type = ctx.project.config.identity.type
@@ -33,7 +38,7 @@ def runtime_member(ctx: Context) -> str | None:
         return f"serviceAccount:{service_account_email(ctx)}"
     if identity_type == IdentityType.PLATFORM:
         return f"serviceAccount:service-{ctx.clients.project_number()}@gcp-sa-aiplatform-re.iam.gserviceaccount.com"
-    principal = (ctx.state.resources.get("engine") or {}).get("effectiveIdentity")
+    principal = agent_principal((ctx.state.resources.get("engine") or {}).get("effectiveIdentity"))
     return f"principal://{principal}" if principal else None
 
 
@@ -137,8 +142,8 @@ class AgentIdentityResource(Resource):
         if ctx.project.config.identity.type != IdentityType.AGENT_IDENTITY:
             return Change(self.key, Action.NOOP, "not used")
         engine = ctx.state.resources.get("engine") or {}
-        if engine.get("effectiveIdentity"):
-            return Change(self.key, Action.NOOP, engine["effectiveIdentity"])
+        if principal := agent_principal(engine.get("effectiveIdentity")):
+            return Change(self.key, Action.NOOP, principal)
         details = [f"replaces {engine['name']} (identity type change)"] if engine.get("name") else []
         return Change(self.key, Action.CREATE, "bare engine to mint the agent principal", details)
 
@@ -168,7 +173,7 @@ class AgentIdentityResource(Resource):
         """Reuse a bare identity engine left by an interrupted run instead of minting a second one."""
         for name in ctx.clients.engine_find(ctx.project.config.display_name):
             live = ctx.clients.engine_get(name) or {}
-            if name != old and live.get("effective_identity"):
+            if name != old and agent_principal(live.get("effective_identity")):
                 return {"name": name, "effective_identity": live["effective_identity"]}
         return None
 
@@ -495,8 +500,8 @@ class EngineResource(Resource):
             raise RuntimeError(f"engine operation failed: {error}")
         st["spec"], st["sourceHash"] = pending["spec"], pending["sourceHash"]
         live = ctx.clients.engine_get(st["name"]) or {}
-        if live.get("effective_identity"):
-            st["effectiveIdentity"] = live["effective_identity"]
+        if principal := agent_principal(live.get("effective_identity")):
+            st["effectiveIdentity"] = principal
         self._set_state(ctx, st)
         return True
 

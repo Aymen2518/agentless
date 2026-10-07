@@ -48,6 +48,9 @@ class FakeGcp:
 
     def iam_modify(self, rtype: str, name: str, add: Any, remove: Any) -> None:
         add, remove = list(add), list(remove)
+        for _, member in add:
+            if member.startswith(("principal://", "principalSet://")) and ".system.id.goog/" not in member:
+                raise RuntimeError(f"400 The member {member} is of an unknown type")
         self.calls.append(("iam", rtype, name, sorted(add), sorted(remove)))
         for role, member in add:
             self.policies[(rtype, name)][role].add(member)
@@ -94,6 +97,9 @@ class FakeGcp:
         self.engines[name] = {"display_name": config["display_name"], "config": config}
         if config.get("spec", {}).get("identity_type") == "AGENT_IDENTITY":
             self.engines[name]["effective_identity"] = f"agents.global.org-1.system.id.goog/resources/aiplatform/{name}"
+        elif config.get("spec", {}).get("service_account"):
+            # Like the live API: a service-account engine reports the SA email as its effective identity.
+            self.engines[name]["effective_identity"] = config["spec"]["service_account"]
         self.calls.append(("engine_create", name, config))
         return self._op(name)
 

@@ -302,6 +302,22 @@ def test_switch_to_agent_identity_replaces_without_orphans(make_provider, gcp, e
     assert not make_provider().plan(DeployOptions())[1].pending
 
 
+def test_switch_to_agent_identity_ignores_sa_email_in_state(make_provider, gcp, edit):
+    # State written before agent_principal(): the SA engine's effectiveIdentity (its SA email) was recorded.
+    deploy(make_provider)
+    store = make_provider().store
+    state = store.read()
+    state.resources["engine"]["effectiveIdentity"] = "sample-dev@proj-dev.iam.gserviceaccount.com"
+    store.write(state)
+    edit(lambda d: d.update(identity={"type": "agentIdentity", "roles": {"project": ["roles/aiplatform.user"]}}))
+    assert actions(make_provider().plan(DeployOptions(allow_replace=True))[1])["agentIdentity"] == Action.CREATE
+    deploy(make_provider, DeployOptions(allow_replace=True))
+    [engine] = gcp.engines.values()
+    assert gcp.policies[("project", "proj-dev")]["roles/aiplatform.user"] == {
+        f"principal://{engine['effective_identity']}"
+    }
+
+
 def test_vanished_identity_engine_is_recreated_and_iam_follows(make_provider, gcp, edit):
     edit(lambda d: d.update(identity={"type": "agentIdentity", "roles": {"project": ["roles/aiplatform.user"]}}))
     deploy(make_provider)

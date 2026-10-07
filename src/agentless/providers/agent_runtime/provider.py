@@ -13,7 +13,7 @@ from agentless.config.loader import Project
 from agentless.package.packager import Package, collect
 from agentless.plan.model import Action, Change, ChangeSet, Context, DeployOptions, Resource
 from agentless.providers.agent_runtime.clients import GcpClients
-from agentless.providers.agent_runtime.resources import ALL_RESOURCES, EngineResource
+from agentless.providers.agent_runtime.resources import ALL_RESOURCES, EngineResource, agent_principal
 from agentless.state.store import GcsStateStore, LocalStateStore, State, StateError, StateStore
 
 
@@ -195,8 +195,8 @@ class AgentRuntimeProvider:
             }
         if state.resources.get("serviceAccount"):
             out["serviceAccount"] = state.resources["serviceAccount"]["email"]
-        if engine.get("effectiveIdentity"):
-            out["agentIdentity"] = f"principal://{engine['effectiveIdentity']}"
+        if principal := agent_principal(engine.get("effectiveIdentity")):
+            out["agentIdentity"] = f"principal://{principal}"
         if state.resources.get("geminiEnterprise"):
             out["geminiEnterprise"] = state.resources["geminiEnterprise"].get("agentName")
         out["iamBindings"] = len((state.resources.get("iam") or {}).get("bindings", []))
