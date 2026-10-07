@@ -37,7 +37,20 @@ Otherwise the `verify` job fails before anything is published.
 
 5. **Watch the run:** `gh run watch -R Aymen2518/agentless`. A failed run can be re-run; the release step uploads
    with `--clobber` if the release already exists.
-6. **After a release candidate**, check it (below), then repeat from step 1 with `__version__ = "X.Y.Z"`.
+6. **Bump the Homebrew formula** (final releases only, not release candidates) in
+   [Aymen2518/homebrew-tap](https://github.com/Aymen2518/homebrew-tap):
+
+   ```bash
+   V=X.Y.Z
+   SHA=$(curl -sL https://github.com/Aymen2518/agentless/releases/download/v$V/SHA256SUMS | awk '/tar.gz/{print $1}')
+   cd homebrew-tap
+   sed -i '' -E "s|/v[0-9.a-z]+/agentless_cli-[0-9.a-z]+\.tar\.gz|/v$V/agentless_cli-$V.tar.gz|; s|sha256 \"[0-9a-f]+\"|sha256 \"$SHA\"|" Formula/agentless.rb
+   brew upgrade agentless && brew test agentless
+   git commit -am "agentless $V" && git push
+   ```
+
+   Until this is done, `brew upgrade agentless` keeps the previous version.
+7. **After a release candidate**, check it (below), then repeat from step 1 with `__version__ = "X.Y.Z"`.
 
 ## Check a release
 
