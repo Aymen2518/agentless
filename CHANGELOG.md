@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-10-05
+
+### Fixed
+- A service-account engine reports its service account email as its effective identity. agentless no longer
+  mistakes that for an Agent Identity principal, which produced a `principal://<sa-email>` IAM member that GCP
+  rejects with `400 … unknown type`, and kept `identity.type: agentIdentity` switches from minting a principal.
+  State written by earlier versions is handled.
+
 ## [0.2.1] - 2026-10-05
 
 ### Fixed
@@ -55,7 +63,8 @@ First public release: wheel and sdist (`agentless-cli`) on the GitHub Release, a
 - Plugins through pluggy entry points in the `agentless` group.
 - Multi-arch container image and Claude Code skills for developing agentless and deploying agents with it.
 
-[Unreleased]: https://github.com/Aymen2518/agentless/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/Aymen2518/agentless/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/Aymen2518/agentless/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/Aymen2518/agentless/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Aymen2518/agentless/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/Aymen2518/agentless/compare/v0.1.0...v0.1.1
