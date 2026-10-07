@@ -11,6 +11,8 @@ from agentless.config.schema import IdentityType
 
 # Fields whose change cannot be applied in place.
 IMMUTABLE_FIELDS = ("psc_interface_config", "encryption_spec", "identity_type")
+# Set when the bare Agent Identity engine is minted, so never part of its first full update.
+SHELL_FIELDS = ("encryption_spec", "identity_type")
 
 # Normalized field -> REST update mask path.
 UPDATE_MASKS = {

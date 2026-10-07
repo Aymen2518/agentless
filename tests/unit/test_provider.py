@@ -302,6 +302,43 @@ def test_switch_to_agent_identity_replaces_without_orphans(make_provider, gcp, e
     assert not make_provider().plan(DeployOptions())[1].pending
 
 
+def test_identity_shell_keeps_cmek_out_of_its_first_update(make_provider, gcp, edit):
+    key = "projects/kms-p/locations/europe-west1/keyRings/r/cryptoKeys/k"
+    edit(lambda d: d["agent"].update(encryption={"kmsKey": key}))
+    edit(lambda d: d.update(identity={"type": "agentIdentity", "roles": {"project": ["roles/aiplatform.user"]}}))
+    deploy(make_provider)
+    [minted] = [c for c in gcp.calls if c[0] == "engine_create_identity"]
+    assert minted[2] == {"kms_key_name": key}
+    [update] = [c for c in gcp.calls if c[0] == "engine_update"]
+    masks = update[2]["update_mask"].split(",")
+    assert "encryption_spec" not in masks and "encryption_spec" not in update[2]
+
+
+def test_switch_to_agent_identity_resumes_after_failed_update(make_provider, gcp, edit, monkeypatch):
+    # The 0.2.2 failure: old engine deleted, then the shell's first update is rejected. A re-run must finish.
+    deploy(make_provider)
+    old_engine = next(iter(gcp.engines))
+    edit(lambda d: d.update(identity={"type": "agentIdentity", "roles": {"project": ["roles/aiplatform.user"]}}))
+    real_update = gcp.engine_update
+
+    def reject(name, config):
+        raise RuntimeError("400 INVALID_ARGUMENT: Cannot update encryption_spec in ReasoningEngine.")
+
+    monkeypatch.setattr(gcp, "engine_update", reject)
+    with pytest.raises(RuntimeError, match="encryption_spec"):
+        deploy(make_provider, DeployOptions(allow_replace=True))
+    assert old_engine not in gcp.engines
+    monkeypatch.setattr(gcp, "engine_update", real_update)
+    deploy(make_provider, DeployOptions(allow_replace=True))
+    [(name, engine)] = gcp.engines.items()
+    state = make_provider().store.read().resources["engine"]
+    assert state["name"] == name and state["spec"] is not None and "previous" not in state
+    assert gcp.policies[("project", "proj-dev")]["roles/aiplatform.user"] == {
+        f"principal://{engine['effective_identity']}"
+    }
+    assert not make_provider().plan(DeployOptions())[1].pending
+
+
 def test_switch_to_agent_identity_ignores_sa_email_in_state(make_provider, gcp, edit):
     # State written before agent_principal(): the SA engine's effectiveIdentity (its SA email) was recorded.
     deploy(make_provider)

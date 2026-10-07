@@ -6,6 +6,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+- Switching an engine to `identity.type: agentIdentity` (or deploying a new one) no longer fails with
+  `400 Cannot update encryption_spec in ReasoningEngine`. The first update of the minted engine sent
+  `encryption_spec`, which is fixed when that engine is created. A deploy that failed this way can simply be re-run.
+
 ## [0.2.2] - 2026-10-05
 
 ### Fixed
