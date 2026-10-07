@@ -85,12 +85,34 @@ Each deploy diffs the desired config against this record and against live GCP re
 Releases are published on GitHub: the wheel and sdist are attached to each
 [GitHub Release](https://github.com/Aymen2518/agentless/releases), and the CLI image is on GHCR. Pick a version from the releases page.
 
+### Homebrew (macOS and Linux)
+
 ```bash
-uv tool install git+https://github.com/Aymen2518/agentless@v0.1.0
+brew install Aymen2518/tap/agentless   # adds the tap and installs the latest formula
+agentless version
+
+brew upgrade agentless                 # later, to move to a newer release
+brew uninstall agentless && brew untap Aymen2518/tap   # to remove it
+```
+
+The formula lives in [Aymen2518/homebrew-tap](https://github.com/Aymen2518/homebrew-tap). It installs the release
+sdist into a private Python 3.11 virtualenv and pulls the dependencies from PyPI.
+
+- **Builds locally:** there are no prebuilt bottles, so Homebrew needs up-to-date developer tools. If it stops with
+  "Your Xcode … is too outdated", update Xcode from the App Store (or remove it and use the Command Line Tools).
+- **One `agentless` on your PATH:** if you also installed it with uv or pipx, remove that copy
+  (`uv tool uninstall agentless-cli`) so `~/.local/bin` doesn't shadow the Homebrew one. Check with `which agentless`.
+- `brew upgrade` only sees a release once the formula in the tap has been bumped (see
+  [docs/RELEASING.md](docs/RELEASING.md)).
+
+### uv, pipx or Docker
+
+```bash
+uv tool install git+https://github.com/Aymen2518/agentless@v0.2.2
 # or, from the release wheel
-uv tool install https://github.com/Aymen2518/agentless/releases/download/v0.1.0/agentless_cli-0.1.0-py3-none-any.whl
+uv tool install https://github.com/Aymen2518/agentless/releases/download/v0.2.2/agentless_cli-0.2.2-py3-none-any.whl
 # or with pipx
-pipx install git+https://github.com/Aymen2518/agentless@v0.1.0
+pipx install git+https://github.com/Aymen2518/agentless@v0.2.2
 # or, without Python: see "Container image" below
 docker run --rm ghcr.io/Aymen2518/agentless --help
 ```
