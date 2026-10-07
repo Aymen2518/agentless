@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-10-07
+
+### Fixed
+- Switching an engine to `identity.type: agentIdentity` (or deploying a new one) no longer fails with
+  `400 Cannot update encryption_spec in ReasoningEngine`. The first update of the minted engine sent
+  `encryption_spec`, which is fixed when that engine is created. A deploy that failed this way can simply be re-run.
+
 ## [0.2.2] - 2026-10-05
 
 ### Fixed
@@ -63,7 +70,8 @@ First public release: wheel and sdist (`agentless-cli`) on the GitHub Release, a
 - Plugins through pluggy entry points in the `agentless` group.
 - Multi-arch container image and Claude Code skills for developing agentless and deploying agents with it.
 
-[Unreleased]: https://github.com/Aymen2518/agentless/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/Aymen2518/agentless/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/Aymen2518/agentless/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/Aymen2518/agentless/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/Aymen2518/agentless/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Aymen2518/agentless/compare/v0.1.1...v0.2.0

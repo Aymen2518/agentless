@@ -447,8 +447,9 @@ class EngineResource(Resource):
         else:
             last = st.get("spec")
             if last is None:
-                # Never deployed (bare shell or adopted): send everything, including create-time fields.
-                fields = [f for f in desired if f not in engine_spec.CODE_FIELDS and f != "identity_type"]
+                # Never deployed (bare shell or adopted): send everything except what the shell was created with.
+                # identity_type and encryption_spec are fixed at creation; the API rejects them in an update mask.
+                fields = [f for f in desired if f not in engine_spec.CODE_FIELDS + engine_spec.SHELL_FIELDS]
             else:
                 fields = change.data.get("fields", [])
                 fields = [f for f in fields if f not in engine_spec.CODE_FIELDS + engine_spec.IMMUTABLE_FIELDS]

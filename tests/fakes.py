@@ -109,12 +109,14 @@ class FakeGcp:
         name = f"projects/123456/locations/{self.region}/reasoningEngines/{next(self._ids)}"
         identity = f"agents.global.org-1.system.id.goog/resources/aiplatform/{name}"
         self.engines[name] = {"display_name": display_name, "effective_identity": identity}
-        self.calls.append(("engine_create_identity", name))
+        self.calls.append(("engine_create_identity", name, encryption_spec))
         return {"name": name, "effective_identity": identity}
 
     def engine_update(self, name: str, config: dict[str, Any]) -> str:
         if name not in self.engines:
             raise RuntimeError(f"404 engine {name} not found")
+        if "encryption_spec" in config.get("update_mask", "").split(","):
+            raise RuntimeError("400 INVALID_ARGUMENT: Cannot update encryption_spec in ReasoningEngine.")
         self.calls.append(("engine_update", name, config))
         return self._op(name)
 
