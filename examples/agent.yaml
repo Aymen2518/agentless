@@ -40,15 +40,13 @@ agent:
     FEATURE_X: true                        # booleans/numbers become strings
   secrets:
     TICKETS_TOKEN: { secret: tickets-api-token, version: latest }   # secretAccessor is granted automatically
-  telemetry: { enabled: true, captureMessageContent: false }
   encryption: { kmsKey: null }             # CMEK; immutable, change needs --allow-replace
 
 identity:
   type: serviceAccount                     # platform (default service agent) | serviceAccount | agentIdentity
   serviceAccount: { create: true, name: "sa-support-${stage}" }   # or { create: false, email: x@y.iam.gserviceaccount.com }
   roles:
-    project: [roles/aiplatform.user, roles/logging.logWriter, roles/cloudtrace.agent,
-              roles/serviceusage.serviceUsageConsumer]
+    project: [roles/aiplatform.user, roles/serviceusage.serviceUsageConsumer]   # tracing roles are automatic
     resources:
       - { type: bigqueryDataset, name: "acme-agents-${stage}:support_kb", roles: [roles/bigquery.dataViewer] }
       - { type: bucket, name: "acme-support-docs-${stage}", roles: [roles/storage.objectViewer] }
@@ -68,6 +66,11 @@ memory:
     embeddingModel: text-embedding-005
     ttl: 2592000s
     topics: [USER_PREFERENCES, KEY_CONVERSATION_DETAILS]
+
+observability:
+  tracing:
+    enabled: true                          # grants cloudtrace.agent, logging.logWriter, monitoring.metricWriter
+    captureContent: ${param:captureContent, false}   # prompts/responses in spans; e.g. -p captureContent=true
 
 publish:
   geminiEnterprise:

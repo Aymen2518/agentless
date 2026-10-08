@@ -106,6 +106,8 @@ def _load(
         impersonate=impersonate,
     )
     pm.hook.agentless_after_load(project=project)
+    for message in project.config.deprecations():
+        typer.secho(f"⚠ {message}", fg=typer.colors.YELLOW, err=True)
     return project, pm
 
 
@@ -319,6 +321,13 @@ def info(
 UNITS = {"s": "seconds", "m": "minutes", "h": "hours", "d": "days"}
 
 
+def _window(since: str) -> datetime.timedelta:
+    match = re.fullmatch(r"(\d+)([smhd])", since)
+    if not match:
+        raise ConfigError("--since expects <number><s|m|h|d>")
+    return datetime.timedelta(**{UNITS[match[2]]: int(match[1])})
+
+
 def _engine_name(provider: AgentRuntimeProvider) -> str:
     name = provider.info().get("engine")
     if not name:
@@ -339,10 +348,7 @@ def logs(
 ) -> None:
     """Print the engine's Cloud Logging entries."""
     project, pm = _load(config, stage, param, impersonate)
-    match = re.fullmatch(r"(\d+)([smhd])", since)
-    if not match:
-        raise ConfigError("--since expects <number><s|m|h|d>")
-    window = datetime.timedelta(**{UNITS[match[2]]: int(match[1])})
+    window = _window(since)
     ops.read_logs(
         project.config.provider.project,
         _engine_name(_provider(project, pm)),
@@ -352,6 +358,66 @@ def logs(
         echo=typer.echo,
         credentials=project.deployer.credentials(),
     )
+
+
+@app.command()
+@handle_errors
+def metrics(
+    config: ConfigOpt = Path(DEFAULT_CONFIG_FILE),
+    stage: StageOpt = None,
+    param: ParamOpt = None,
+    since: Annotated[str, typer.Option(help="Look-back window, e.g. 30m, 2h, 1d.")] = "1h",
+    as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output.")] = False,
+    impersonate: ImpersonateOpt = None,
+) -> None:
+    """Request count, error rate and latency of the deployed agent (Cloud Monitoring, read-only)."""
+    project, pm = _load(config, stage, param, impersonate)
+    data = ops.metrics(
+        project.config.provider.project,
+        _engine_name(_provider(project, pm)),
+        since=_window(since),
+        credentials=project.deployer.credentials(),
+    )
+    if as_json:
+        typer.echo(json.dumps(data, indent=2))
+        return
+    cfg = project.config
+    typer.secho(f"{cfg.service} → stage {cfg.provider.stage}, last {since}", bold=True)
+    classes = ", ".join(f"{k} {v}" for k, v in data["byClass"].items())
+    typer.echo(f"  requests  {data['requests']}" + (f"  ({classes})" if classes else ""))
+    rate = data["errorRate"]
+    typer.echo(f"  errors    {'-' if rate is None else f'{rate:.1%}'} 5xx")
+    p50, p95 = (data["latencyMs"][k] for k in ("p50", "p95"))
+    typer.echo(f"  latency   p50 {_ms(p50)}  p95 {_ms(p95)}")
+    if not data["requests"]:
+        typer.echo("  no requests in this window (metrics can lag a few minutes)")
+
+
+def _ms(value: float | None) -> str:
+    if value is None:
+        return "-"
+    return f"{value / 1000:.1f}s" if value >= 1000 else f"{value:.0f}ms"
+
+
+@app.command("open")
+@handle_errors
+def open_(
+    target: Annotated[str, typer.Argument(help=f"One of: {', '.join(ops.CONSOLE_TARGETS)}.")] = "console",
+    config: ConfigOpt = Path(DEFAULT_CONFIG_FILE),
+    stage: StageOpt = None,
+    param: ParamOpt = None,
+    print_only: Annotated[bool, typer.Option("--print", help="Print the URL instead of opening a browser.")] = False,
+    impersonate: ImpersonateOpt = None,
+) -> None:
+    """Open the agent's Cloud Console page, its logs, or the project's traces."""
+    if target not in ops.CONSOLE_TARGETS:
+        raise ConfigError(f"unknown target {target!r}; choose one of: {', '.join(ops.CONSOLE_TARGETS)}")
+    project, pm = _load(config, stage, param, impersonate)
+    cfg = project.config.provider
+    url = ops.console_links(cfg.project, cfg.region, _engine_name(_provider(project, pm)))[target]
+    typer.echo(url)
+    if not print_only:
+        typer.launch(url)
 
 
 @app.command()

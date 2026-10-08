@@ -188,13 +188,28 @@ def _target(k: IamKey) -> str:
     return f"{k[0]}/{k[1]}"
 
 
+def _why(k: IamKey, automatic: set[IamKey]) -> str:
+    return " (automatic: tracing)" if k in automatic else ""
+
+
+TRACING_ROLES = ("roles/cloudtrace.agent", "roles/logging.logWriter", "roles/monitoring.metricWriter")
+
+
 class IamResource(Resource):
     """Role bindings for the runtime identity; only bindings agentless added are ever removed."""
 
     key = "iam"
 
     def desired(self, ctx: Context, member: str) -> set[IamKey]:
-        """All bindings implied by agent.yaml, including secret and artifact access."""
+        """All bindings implied by agent.yaml, including secret, artifact and tracing access."""
+        return self.declared(ctx, member) | self.automatic(ctx, member)
+
+    def _auto_only(self, ctx: Context, member: str) -> set[IamKey]:
+        return self.automatic(ctx, member) - self.declared(ctx, member)
+
+    @staticmethod
+    def declared(ctx: Context, member: str) -> set[IamKey]:
+        """Bindings agent.yaml asks for, directly or through secrets and the artifacts bucket."""
         cfg = ctx.project.config
         roles = cfg.identity.roles
         out: set[IamKey] = {("project", cfg.provider.project, r, member) for r in roles.project}
@@ -206,6 +221,17 @@ class IamResource(Resource):
         if cfg.memory.artifacts_bucket:
             out.add(("bucket", cfg.memory.artifacts_bucket.removeprefix("gs://"), "roles/storage.objectUser", member))
         return out
+
+    @staticmethod
+    def automatic(ctx: Context, member: str) -> set[IamKey]:
+        """Bindings agentless adds on its own: what tracing needs to write spans, logs and metrics.
+
+        The platform service agent already holds them through its own role, so it gets nothing extra.
+        """
+        cfg = ctx.project.config
+        if not cfg.observability.tracing.enabled or cfg.identity.type == IdentityType.PLATFORM:
+            return set()
+        return {("project", cfg.provider.project, role, member) for role in TRACING_ROLES}
 
     def _owned(self, ctx: Context) -> set[IamKey]:
         return {tuple(b) for b in self._state(ctx).get("bindings", [])}  # type: ignore[misc]
@@ -236,16 +262,18 @@ class IamResource(Resource):
         member = runtime_member(ctx)
         if member is None:
             pending = self.desired(ctx, "<agent principal>")
+            auto = self._auto_only(ctx, "<agent principal>")
             return Change(
                 self.key,
                 Action.CREATE,
                 f"{len(pending)} binding(s), principal known after apply",
-                [f"+ {k[2]} on {_target(k)}" for k in sorted(pending)],
+                [f"+ {k[2]} on {_target(k)}{_why(k, auto)}" for k in sorted(pending)],
             )
         desired = self.desired(ctx, member)
+        auto = self._auto_only(ctx, member)
         to_add, to_remove, foreign, missing = self._diff(ctx, desired)
         missing_desired = sorted({_target(k) for k in desired if _target(k) in missing})
-        details = [f"+ {k[2]} on {_target(k)} → {k[3]}" for k in sorted(to_add)]
+        details = [f"+ {k[2]} on {_target(k)} → {k[3]}{_why(k, auto)}" for k in sorted(to_add)]
         details += [f"- {k[2]} on {_target(k)} → {k[3]}" for k in sorted(to_remove)]
         details += [f"= {k[2]} on {_target(k)} (already granted, not managed)" for k in sorted(foreign)]
         blocked = (

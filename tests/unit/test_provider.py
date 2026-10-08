@@ -101,17 +101,17 @@ def test_iam_never_touches_foreign_bindings(make_provider, gcp, edit):
     gcp.policies[("project", "proj-dev")]["roles/viewer"].add("user:someone@example.com")
     gcp.policies[("project", "proj-dev")]["roles/aiplatform.user"].add(SA)  # granted outside agentless
     deploy(make_provider)
-    edit(lambda d: d["identity"]["roles"].update(project=["roles/logging.logWriter"]))
+    edit(lambda d: d["identity"]["roles"].update(project=["roles/bigquery.jobUser"]))
     _, cs = make_provider().plan(DeployOptions())
     assert actions(cs)["iam"] == Action.UPDATE
     deploy(make_provider)
     project = gcp.policies[("project", "proj-dev")]
     assert project["roles/aiplatform.user"] == {SA}, "binding agentless did not create must survive"
-    assert project["roles/logging.logWriter"] == {SA}
+    assert project["roles/bigquery.jobUser"] == {SA}
     make_provider().remove(YES)
     assert project["roles/viewer"] == {"user:someone@example.com"}
     assert project["roles/aiplatform.user"] == {SA}
-    assert project["roles/logging.logWriter"] == set()
+    assert project["roles/bigquery.jobUser"] == set()
 
 
 def test_psc_change_is_blocked_without_allow_replace(make_provider, gcp, edit):

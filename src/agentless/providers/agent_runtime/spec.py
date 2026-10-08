@@ -94,13 +94,13 @@ def _env(project: Project, engine_name: str | None) -> dict[str, str]:
     if "GEMINI_API_KEY" not in env and "GOOGLE_API_KEY" not in env:
         env.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "true")
         env.setdefault("GOOGLE_CLOUD_LOCATION", "global")
-    telemetry = cfg.agent.telemetry
-    env.setdefault("GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY", str(telemetry.enabled).lower())
+    tracing = cfg.observability.tracing
+    env.setdefault("GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY", str(tracing.enabled).lower())
     env.setdefault(
         "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT",
-        "SPAN_AND_EVENT" if telemetry.capture_message_content else "NO_CONTENT",
+        "SPAN_AND_EVENT" if tracing.capture_content else "NO_CONTENT",
     )
-    env.setdefault("ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS", str(telemetry.capture_message_content).lower())
+    env.setdefault("ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS", str(tracing.capture_content).lower())
     if engine_name:
         env.setdefault(
             "APP_URL", f"https://{cfg.provider.region}-aiplatform.googleapis.com/reasoningEngines/v1/{engine_name}/api"

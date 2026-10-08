@@ -57,7 +57,16 @@
           "type": "object"
         },
         "telemetry": {
-          "$ref": "#/$defs/Telemetry"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Telemetry"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Deprecated: use observability.tracing."
         },
         "encryption": {
           "$ref": "#/$defs/Encryption"
@@ -422,6 +431,17 @@
       "title": "Network",
       "type": "object"
     },
+    "Observability": {
+      "additionalProperties": false,
+      "description": "Tracing, logging and monitoring of the deployed agent.",
+      "properties": {
+        "tracing": {
+          "$ref": "#/$defs/Tracing"
+        }
+      },
+      "title": "Observability",
+      "type": "object"
+    },
     "OrganizationRoles": {
       "additionalProperties": false,
       "description": "Org-level roles; usually need an org admin to apply.",
@@ -780,7 +800,8 @@
     },
     "Telemetry": {
       "additionalProperties": false,
-      "description": "Telemetry toggles mapped to the env vars agents-cli sets.",
+      "deprecated": true,
+      "description": "Deprecated: use `observability.tracing`.",
       "properties": {
         "enabled": {
           "default": true,
@@ -794,6 +815,26 @@
         }
       },
       "title": "Telemetry",
+      "type": "object"
+    },
+    "Tracing": {
+      "additionalProperties": false,
+      "description": "Cloud Trace export from the agent (OpenTelemetry), mapped to the env vars agents-cli sets.",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "description": "Export traces. Also grants the runtime identity roles/cloudtrace.agent, roles/logging.logWriter and roles/monitoring.metricWriter on the project (not needed for the platform service agent).",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "captureContent": {
+          "default": false,
+          "description": "Record prompts and responses in spans. Keep off where data is sensitive.",
+          "title": "Capturecontent",
+          "type": "boolean"
+        }
+      },
+      "title": "Tracing",
       "type": "object"
     }
   },
@@ -834,6 +875,9 @@
     },
     "publish": {
       "$ref": "#/$defs/Publish"
+    },
+    "observability": {
+      "$ref": "#/$defs/Observability"
     },
     "custom": {
       "additionalProperties": true,

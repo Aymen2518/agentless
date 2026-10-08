@@ -6,6 +6,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+- `observability.tracing` in `agent.yaml` (`enabled`, `captureContent`) configures Cloud Trace export. YAML is the
+  only source; use `${param:}` to vary it per stage or from `-p`.
+- With tracing on, the runtime identity gets `roles/cloudtrace.agent`, `roles/logging.logWriter` and
+  `roles/monitoring.metricWriter` automatically, for a service account and for an Agent Identity principal.
+  `plan` marks them `(automatic: tracing)`. Turning tracing off revokes only what agentless granted.
+- `agentless metrics [--since 1h] [--json]`: request count, 5xx rate and p50/p95 latency from Cloud Monitoring.
+  The deployer needs `roles/monitoring.viewer`.
+- `agentless open [console|logs|traces] [--print]`: Cloud Console links for the engine.
+
+### Deprecated
+- `agent.telemetry` still works and maps to `observability.tracing`, with a warning. Setting both is an error.
+
 ## [0.2.3] - 2026-10-07
 
 ### Fixed
