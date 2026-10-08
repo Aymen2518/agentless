@@ -131,10 +131,31 @@ class SecretRef(_Model):
 
 
 class Telemetry(_Model):
-    """Telemetry toggles mapped to the env vars agents-cli sets."""
+    """Deprecated: use `observability.tracing`."""
+
+    model_config = ConfigDict(json_schema_extra={"deprecated": True})
 
     enabled: bool = True
     capture_message_content: bool = False
+
+
+class Tracing(_Model):
+    """Cloud Trace export from the agent (OpenTelemetry), mapped to the env vars agents-cli sets."""
+
+    enabled: bool = Field(
+        default=True,
+        description="Export traces. Also grants the runtime identity roles/cloudtrace.agent, roles/logging.logWriter "
+        "and roles/monitoring.metricWriter on the project (not needed for the platform service agent).",
+    )
+    capture_content: bool = Field(
+        default=False, description="Record prompts and responses in spans. Keep off where data is sensitive."
+    )
+
+
+class Observability(_Model):
+    """Tracing, logging and monitoring of the deployed agent."""
+
+    tracing: Tracing = Field(default_factory=Tracing)
 
 
 class Encryption(_Model):
@@ -154,7 +175,7 @@ class Agent(_Model):
     runtime: Runtime = Field(default_factory=Runtime)
     environment: dict[str, str] = Field(default_factory=dict)
     secrets: dict[str, SecretRef] = Field(default_factory=dict)
-    telemetry: Telemetry = Field(default_factory=Telemetry)
+    telemetry: Telemetry | None = Field(default=None, description="Deprecated: use observability.tracing.")
     encryption: Encryption = Field(default_factory=Encryption)
 
     @field_validator("environment", mode="before")
@@ -332,7 +353,29 @@ class AgentConfig(_Model):
     network: Network = Field(default_factory=Network)
     memory: Memory = Field(default_factory=Memory)
     publish: Publish = Field(default_factory=Publish)
+    observability: Observability = Field(default_factory=Observability)
     custom: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _legacy_telemetry(self) -> AgentConfig:
+        legacy = self.agent.telemetry
+        if legacy is None:
+            return self
+        if "tracing" in self.observability.model_fields_set:
+            raise ValueError("set observability.tracing or the deprecated agent.telemetry, not both")
+        self.observability.tracing = Tracing(enabled=legacy.enabled, capture_content=legacy.capture_message_content)
+        return self
+
+    def deprecations(self) -> list[str]:
+        """Settings that still work but should be migrated."""
+        if self.agent.telemetry is None:
+            return []
+        return [
+            (
+                "agent.telemetry is deprecated: move it to observability.tracing "
+                "(enabled, captureContent instead of captureMessageContent)"
+            )
+        ]
 
     @property
     def display_name(self) -> str:

@@ -225,13 +225,49 @@ identity:
 | `agent.runtime` | cpu, memory, min/max instances, concurrency, server mode | `spec.deploymentSpec.*` |
 | `agent.environment` / `agent.secrets` | env vars and Secret Manager refs | `deploymentSpec.env` / `secretEnv` |
 | `agent.build.args` | Docker build args | `sourceCodeSpec.imageSpec.buildArgs` |
-| `agent.telemetry` | trace export, prompt/response capture (off by default) | env vars, same as agents-cli |
 | `agent.encryption.kmsKey` | CMEK | `encryptionSpec` (immutable) |
 | `identity` | `platform` (default service agent), `serviceAccount` (created or existing), `agentIdentity` (preview) | `spec.serviceAccount` / `identityType` |
 | `identity.roles` | project, organization, and per-resource roles (bucket, secret, BigQuery dataset, SA, folder) | IAM policies |
 | `network.pscInterface` | network attachment + DNS peering | `deploymentSpec.pscInterfaceConfig` (immutable) |
 | `memory` | sessions mode, artifacts bucket, Memory Bank models/TTL/topics | `contextSpec.memoryBankConfig` |
 | `publish.geminiEnterprise` | register in a GE app, optional OAuth authorization with scopes | Discovery Engine `agents` / `authorizations` |
+| `observability.tracing` | Cloud Trace export (on by default), prompt/response capture (off by default), runtime roles granted automatically | env vars, same as agents-cli; project IAM |
+
+### Observability
+
+Tracing is configured in `agent.yaml` only. That file stays the source of truth, so a deploy without some flag can't
+silently turn tracing off again.
+
+```yaml
+observability:
+  tracing:
+    enabled: true            # default
+    captureContent: false    # default; records prompts and responses in spans when true
+```
+
+- **Roles are automatic.** With tracing on, agentless grants the runtime identity `roles/cloudtrace.agent`,
+  `roles/logging.logWriter` and `roles/monitoring.metricWriter` on the project. This applies to a service account
+  and to an Agent Identity principal. `plan` marks those lines `(automatic: tracing)`. Turning tracing off revokes
+  them, unless you also list them in `identity.roles`. Bindings granted outside agentless are never touched. The
+  `platform` identity gets nothing extra, since its service agent already has them.
+- **Per stage or from the CLI:** point the setting at a param, so it's still declared in the file:
+
+  ```yaml
+  observability:
+    tracing:
+      captureContent: ${param:captureContent, false}
+  stages:
+    dev: { params: { captureContent: true } }
+  ```
+
+  `agentless deploy --stage prod -p captureContent=true` then turns it on for one deploy, and `plan` shows the change.
+- **Reading it back:**
+  - `agentless logs` shows the engine's Cloud Logging entries.
+  - `agentless metrics --since 1h` shows request count, 5xx rate and p50/p95 latency from Cloud Monitoring.
+  - `agentless open console|logs|traces` opens the Console, or prints the URL with `--print`. `traces` opens the
+    project's Trace explorer, because it can't be pre-filtered by URL.
+- `agent.telemetry` (`enabled`, `captureMessageContent`) still works but is deprecated: `validate` and every command
+  print a warning. Setting both is an error.
 
 agentless also grants some access automatically. Each secret in `agent.secrets` gets `secretAccessor`, and
 `memory.artifactsBucket` gets `storage.objectUser`.
@@ -307,6 +343,8 @@ needs prod's environment variables.
 | `deploy [-y] [--force] [--code-only] [--allow-replace] [--no-wait] [--status]` | apply |
 | `info [--json]` | engine, SA, principal, URLs, GE registration |
 | `logs [--since 1h] [--severity WARNING] [--tail]` | Cloud Logging for the engine |
+| `metrics [--since 1h] [--json]` | request count, 5xx rate, p50/p95 latency (Cloud Monitoring) |
+| `open [console\|logs\|traces] [--print]` | Cloud Console page for the engine |
 | `invoke -m "..." [--session ID] [--raw]` | `:streamQuery`, same as `agents-cli run --mode adk` |
 | `remove [-y]` | delete the stage (non-interactive runs need `--yes`) |
 | `unlock` | release a stale lock |
@@ -322,9 +360,9 @@ Without a TTY (CI), `deploy` applies without asking, like `serverless deploy`. W
 
 | Principal | Roles |
 |---|---|
-| Deployer (your user, a CI service account via Workload Identity Federation, or the impersonated `provider.deployer`) | `roles/aiplatform.admin`, `roles/iam.serviceAccountAdmin`, `roles/iam.serviceAccountUser`, `roles/resourcemanager.projectIamAdmin`, `roles/storage.objectAdmin` on the state bucket, `roles/secretmanager.admin` (or `setIamPolicy`) on the agent's secrets, `roles/discoveryengine.editor` to publish. Org-level grants also need org IAM admin. Leave `identity.roles.organization` out until that's approved. |
+| Deployer (your user, a CI service account via Workload Identity Federation, or the impersonated `provider.deployer`) | `roles/aiplatform.admin`, `roles/iam.serviceAccountAdmin`, `roles/iam.serviceAccountUser`, `roles/resourcemanager.projectIamAdmin`, `roles/storage.objectAdmin` on the state bucket, `roles/secretmanager.admin` (or `setIamPolicy`) on the agent's secrets, `roles/discoveryengine.editor` to publish, `roles/monitoring.viewer` for `agentless metrics`. Org-level grants also need org IAM admin. Leave `identity.roles.organization` out until that's approved. |
 | Caller, when impersonating a deployer | `roles/iam.serviceAccountTokenCreator` on the deployer SA (and on each delegate) |
-| Runtime SA | only what `identity.roles` lists, plus automatic secret and artifact grants |
+| Runtime SA or Agent Identity principal | what `identity.roles` lists, plus automatic grants: secrets, the artifacts bucket, and with tracing on `cloudtrace.agent`, `logging.logWriter`, `monitoring.metricWriter` |
 
 Data resources and API enablement belong to your infrastructure-as-code (for example a Terraform foundation
 layer). agentless reads its outputs through `${tf(...)}` or params.
@@ -433,7 +471,7 @@ docker run --rm \
 | `src/agentless/providers/agent_runtime/resources.py` | the five resources above |
 | `src/agentless/providers/agent_runtime/spec.py` | `agent.yaml` → engine spec, diff, update masks, API payloads, secret redaction |
 | `src/agentless/providers/agent_runtime/clients.py` | the only module that calls GCP (Agent Platform SDK, IAM, Resource Manager, Secret Manager, Storage, BigQuery, Discovery Engine REST) |
-| `src/agentless/providers/agent_runtime/ops.py` | `logs` and `invoke` |
+| `src/agentless/providers/agent_runtime/ops.py` | `logs`, `metrics`, console links and `invoke` |
 | `tests/fakes.py` | `FakeGcp`, an in-memory stand-in for `clients.py` used by the provider tests |
 | `examples/`, `schema/` | reference configs, and the JSON Schema generated by `agentless schema` |
 
@@ -464,7 +502,7 @@ docker run --rm \
 ## Status and roadmap
 
 **Verified:**
-- 64 unit tests: the variable resolver, loader, packager, CLI, and the full provider lifecycle against `FakeGcp`
+- 125 unit tests: the variable resolver, loader, packager, CLI, and the full provider lifecycle against `FakeGcp`
   (create, no-op, config-only and code-only updates, replace, adoption, identity switches, partial failures, publish,
   remove).
 - ruff and ty are clean.
