@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-08
+
 ### Added
 - `resources.buckets` in `agent.yaml`: GCS buckets agentless creates and owns, for example for generated reports.
   Uniform access and public access prevention are always on. You can set location, storage class, versioning,
@@ -95,7 +97,8 @@ First public release: wheel and sdist (`agentless-cli`) on the GitHub Release, a
 - Plugins through pluggy entry points in the `agentless` group.
 - Multi-arch container image and Claude Code skills for developing agentless and deploying agents with it.
 
-[Unreleased]: https://github.com/Aymen2518/agentless/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/Aymen2518/agentless/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/Aymen2518/agentless/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Aymen2518/agentless/compare/v0.2.3...v0.3.0
 [0.2.3]: https://github.com/Aymen2518/agentless/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/Aymen2518/agentless/compare/v0.2.1...v0.2.2
