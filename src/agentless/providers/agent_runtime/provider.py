@@ -193,6 +193,8 @@ class AgentRuntimeProvider:
                 "console": f"https://console.cloud.google.com/vertex-ai/agents/agent-engines/locations/"
                 f"{cfg.provider.region}/agent-engines/{engine_id}?project={cfg.provider.project}",
             }
+        if buckets := (state.resources.get("buckets") or {}).get("items"):
+            out["buckets"] = {e.get("key", n): f"gs://{n}" for n, e in sorted(buckets.items())}
         if state.resources.get("serviceAccount"):
             out["serviceAccount"] = state.resources["serviceAccount"]["email"]
         if principal := agent_principal(engine.get("effectiveIdentity")):

@@ -18,6 +18,10 @@ def deploy(make_provider, options=None, stage=None):
     return make_provider(stage).deploy(options or DeployOptions(), YES)
 
 
+def change(changeset, resource):
+    return next(c for c in changeset.changes if c.resource == resource)
+
+
 def engine_updates(gcp):
     return [c for c in gcp.calls if c[0] == "engine_update"]
 
@@ -27,6 +31,7 @@ def test_first_deploy_creates_everything(make_provider, gcp, agent_dir):
     assert actions(cs) == {
         "serviceAccount": Action.CREATE,
         "agentIdentity": Action.NOOP,
+        "buckets": Action.NOOP,
         "iam": Action.CREATE,
         "engine": Action.CREATE,
         "geminiEnterprise": Action.NOOP,
@@ -69,7 +74,7 @@ def test_env_change_updates_only_env_without_rebuild(make_provider, gcp, edit):
     edit(lambda d: d["agent"]["environment"].update(BUCKET="other"))
     _, cs = make_provider().plan(DeployOptions())
     assert {c.resource for c in cs.pending} == {"engine"}
-    assert any("env.BUCKET" in d for d in cs.changes[3].details)
+    assert any("env.BUCKET" in d for d in change(cs, "engine").details)
     deploy(make_provider)
     last = engine_updates(gcp)[-1][2]
     assert last["update_mask"] == "spec.deployment_spec.env"
@@ -93,7 +98,7 @@ def test_code_only_defers_config(make_provider, gcp, agent_dir, edit):
     deploy(make_provider, DeployOptions(code_only=True))
     assert "max_instances" not in engine_updates(gcp)[-1][2]["update_mask"]
     _, cs = make_provider().plan(DeployOptions())
-    engine = cs.changes[3]
+    engine = change(cs, "engine")
     assert engine.action == Action.UPDATE and engine.data["fields"] == ["max_instances"] and not engine.data["code"]
 
 
@@ -120,7 +125,7 @@ def test_psc_change_is_blocked_without_allow_replace(make_provider, gcp, edit):
         lambda d: d.update(network={"pscInterface": {"networkAttachment": "projects/h/regions/r/networkAttachments/a"}})
     )
     _, cs = make_provider().plan(DeployOptions())
-    assert cs.changes[3].action == Action.REPLACE and cs.blocked
+    assert change(cs, "engine").action == Action.REPLACE and cs.blocked
     with pytest.raises(DeployError, match="--allow-replace"):
         deploy(make_provider)
     old = next(iter(gcp.engines))
@@ -134,7 +139,7 @@ def test_adopts_engine_deployed_by_agents_cli(make_provider, gcp):
     existing = "projects/123456/locations/europe-west1/reasoningEngines/999"
     gcp.engines[existing] = {"display_name": "sample-agent-dev"}
     _, cs = make_provider().plan(DeployOptions())
-    assert cs.changes[3].action == Action.UPDATE and "adopting" in cs.changes[3].details[0]
+    assert change(cs, "engine").action == Action.UPDATE and "adopting" in change(cs, "engine").details[0]
     deploy(make_provider)
     assert not [c for c in gcp.calls if c[0] == "engine_create"]
     assert engine_updates(gcp)[0][1] == existing
@@ -172,7 +177,7 @@ def test_agent_identity_mints_principal_before_iam(make_provider, gcp, edit):
     edit(lambda d: d.update(identity={"type": "agentIdentity", "roles": {"project": ["roles/aiplatform.user"]}}))
     _, cs = make_provider().plan(DeployOptions())
     assert actions(cs)["agentIdentity"] == Action.CREATE
-    assert "known after apply" in cs.changes[2].summary
+    assert "known after apply" in change(cs, "iam").summary
     deploy(make_provider)
     kinds = gcp.kinds()
     assert kinds.index("engine_create_identity") < kinds.index("iam") < kinds.index("engine_update")
@@ -271,7 +276,7 @@ def test_missing_iam_target_blocks_plan(make_provider, gcp):
     real = gcp.iam_members
     gcp.iam_members = lambda rtype, name: None if rtype == "bucket" else real(rtype, name)
     _, cs = make_provider().plan(DeployOptions())
-    assert cs.changes[2].blocked and "bucket/bk-dev" in cs.changes[2].blocked
+    assert change(cs, "iam").blocked and "bucket/bk-dev" in change(cs, "iam").blocked
 
 
 GE_APP = "projects/123456/locations/global/collections/default_collection/engines/ge-app"
