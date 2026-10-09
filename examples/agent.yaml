@@ -67,6 +67,14 @@ memory:
     ttl: 2592000s
     topics: [USER_PREFERENCES, KEY_CONVERSATION_DETAILS]
 
+resources:
+  buckets:
+    reports:                               # created before the engine; objectUser granted automatically
+      name: acme-support-reports-${stage}
+      lifecycle: { deleteAfterDays: 90 }
+      env: REPORTS_BUCKET                  # injected into the agent
+      deletionPolicy: retain               # remove keeps the bucket and its data (default)
+
 observability:
   tracing:
     enabled: true                          # grants cloudtrace.agent, logging.logWriter, monitoring.metricWriter

@@ -88,6 +88,9 @@ def _env(project: Project, engine_name: str | None) -> dict[str, str]:
         env.setdefault("SESSION_SERVICE_URI", "memory://")
     if cfg.memory.artifacts_bucket:
         env.setdefault("LOGS_BUCKET_NAME", cfg.memory.artifacts_bucket.removeprefix("gs://"))
+    for bucket in cfg.resources.buckets.values():
+        if bucket.env:
+            env.setdefault(bucket.env, bucket.name)
     version = _project_version(project)
     if version:
         env.setdefault("AGENT_VERSION", version)

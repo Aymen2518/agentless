@@ -18,6 +18,9 @@ class FakeGcp:
         self.operations: dict[str, dict[str, Any]] = {}
         self.ge_agents: dict[str, dict[str, Any]] = {}
         self.ge_authorizations: dict[str, dict[str, Any]] = {}
+        self.buckets: dict[str, dict[str, Any]] = {}
+        self.bucket_objects: dict[str, int] = defaultdict(int)
+        self.absent_buckets: set[str] = set()  # IAM targets that do not exist (others are assumed to)
         self.ops_done_immediately = True
         self._ids = itertools.count(1)
 
@@ -44,10 +47,14 @@ class FakeGcp:
 
     # IAM
     def iam_members(self, rtype: str, name: str) -> dict[str, set[str]] | None:
+        if rtype == "bucket" and name in self.absent_buckets:
+            return None
         return {r: set(m) for r, m in self.policies[(rtype, name)].items()}
 
     def iam_modify(self, rtype: str, name: str, add: Any, remove: Any) -> None:
         add, remove = list(add), list(remove)
+        if rtype == "bucket" and name in self.absent_buckets:
+            raise RuntimeError(f"404 bucket {name} not found")
         for _, member in add:
             if member.startswith(("principal://", "principalSet://")) and ".system.id.goog/" not in member:
                 raise RuntimeError(f"400 The member {member} is of an unknown type")
@@ -56,6 +63,34 @@ class FakeGcp:
             self.policies[(rtype, name)][role].add(member)
         for role, member in remove:
             self.policies[(rtype, name)][role].discard(member)
+
+    # buckets
+    def bucket_get(self, name: str) -> dict[str, Any] | None:
+        b = self.buckets.get(name)
+        return None if b is None else {"name": name, **{k: (dict(v) if k == "labels" else v) for k, v in b.items()}}
+
+    def bucket_create(self, name: str, spec: dict[str, Any]) -> None:
+        if name in self.buckets:
+            raise RuntimeError(f"409 bucket {name} already exists")
+        self.calls.append(("bucket_create", name, spec))
+        self.buckets[name] = {**spec, "labels": dict(spec["labels"]), "project_number": "123456"}
+        self.absent_buckets.discard(name)
+
+    def bucket_update(self, name: str, spec: dict[str, Any]) -> None:
+        self.calls.append(("bucket_update", name, spec))
+        live = self.buckets[name]
+        live.update({k: v for k, v in spec.items() if k not in ("labels", "location")})
+        live["labels"] = {**live.get("labels", {}), **spec["labels"]}
+
+    def bucket_is_empty(self, name: str) -> bool:
+        return not self.bucket_objects[name]
+
+    def bucket_delete(self, name: str) -> None:
+        if self.bucket_objects[name]:
+            raise RuntimeError(f"409 bucket {name} is not empty")
+        self.calls.append(("bucket_delete", name))
+        self.buckets.pop(name, None)
+        self.absent_buckets.add(name)
 
     # engines
     def _op(self, engine: str) -> str:

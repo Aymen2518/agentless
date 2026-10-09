@@ -145,6 +145,67 @@ class GcpClients:
 
         _retry(attempt)
 
+    # --- buckets -----------------------------------------------------------------------------------------------
+
+    @functools.cached_property
+    def _storage(self) -> Any:
+        from google.cloud import storage
+
+        return storage.Client(project=self.project, credentials=self._credentials)
+
+    def bucket_get(self, name: str) -> dict[str, Any] | None:
+        """Settings agentless manages; None when missing, {"forbidden": True} when it exists but can't be read."""
+        from google.api_core import exceptions
+
+        try:
+            bucket = self._storage.get_bucket(name)
+        except exceptions.NotFound:
+            return None
+        except exceptions.Forbidden:
+            return {"name": name, "forbidden": True}
+        ages = [
+            r.get("condition", {}).get("age")
+            for r in bucket.lifecycle_rules
+            if r.get("action", {}).get("type") == "Delete" and set(r.get("condition", {})) == {"age"}
+        ]
+        return {
+            "name": name,
+            "project_number": str(bucket.project_number) if bucket.project_number else None,
+            "location": bucket.location or "",
+            "storage_class": bucket.storage_class,
+            "versioning": bool(bucket.versioning_enabled),
+            "delete_after_days": ages[0] if len(ages) == 1 else None,
+            "labels": dict(bucket.labels or {}),
+            "kms_key": bucket.default_kms_key_name,
+        }
+
+    def bucket_create(self, name: str, spec: dict[str, Any]) -> None:
+        """Create with uniform access and public access prevention always on."""
+        bucket = self._storage.bucket(name)
+        _apply_bucket_spec(bucket, spec, labels=spec["labels"])
+        bucket.iam_configuration.uniform_bucket_level_access_enabled = True
+        bucket.iam_configuration.public_access_prevention = "enforced"
+        self._storage.create_bucket(bucket, location=spec["location"])
+
+    def bucket_update(self, name: str, spec: dict[str, Any]) -> None:
+        """Patch managed settings; labels set outside agentless are kept."""
+        bucket = self._storage.get_bucket(name)
+        _apply_bucket_spec(bucket, spec, labels={**(bucket.labels or {}), **spec["labels"]})
+        bucket.patch()
+
+    def bucket_is_empty(self, name: str) -> bool:
+        """True when no object (including noncurrent versions) is left."""
+        return next(iter(self._storage.list_blobs(name, max_results=1, versions=True)), None) is None
+
+    def bucket_delete(self, name: str) -> None:
+        """Delete an empty bucket; the API refuses (409) if anything is left."""
+        from google.api_core import exceptions
+
+        try:
+            self._storage.bucket(name).delete()
+        except exceptions.NotFound:
+            pass
+
     # --- reasoning engines ---------------------------------------------------------------------------------------
 
     @functools.cached_property
@@ -386,6 +447,17 @@ def _retry(fn: Callable[[], None]) -> None:
             if not transient or attempt == _IAM_RETRIES - 1:
                 raise
             time.sleep(2**attempt)
+
+
+def _apply_bucket_spec(bucket: Any, spec: dict[str, Any], labels: dict[str, str]) -> None:
+    bucket.storage_class = spec["storage_class"]
+    bucket.versioning_enabled = spec["versioning"]
+    bucket.labels = labels
+    if spec["kms_key"] or bucket.default_kms_key_name:
+        bucket.default_kms_key_name = spec["kms_key"]
+    bucket.clear_lifecycle_rules()
+    if spec["delete_after_days"]:
+        bucket.add_lifecycle_delete_rule(age=spec["delete_after_days"])
 
 
 def _bucket(name: str, project: str, credentials: Any) -> Any:

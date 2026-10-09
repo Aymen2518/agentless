@@ -314,6 +314,72 @@ class Memory(_Model):
     memory_bank: MemoryBank | None = None
 
 
+_BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{1,61}[a-z0-9]$")
+
+BUCKET_ROLES = {
+    "objectViewer": "roles/storage.objectViewer",
+    "objectUser": "roles/storage.objectUser",
+    "objectAdmin": "roles/storage.objectAdmin",
+}
+
+
+class BucketLifecycle(_Model):
+    """Object lifecycle; agentless owns the bucket's lifecycle rules once this is set."""
+
+    delete_after_days: int | None = Field(default=None, ge=1, description="Delete objects older than this.")
+
+
+class Bucket(_Model):
+    """A GCS bucket agentless creates and owns, with access granted to the agent's runtime identity."""
+
+    name: str = Field(description="Globally unique bucket name, e.g. acme-reports-${stage}.")
+    location: str | None = Field(default=None, description="Region or multi-region; defaults to provider.region.")
+    storage_class: Literal["STANDARD", "NEARLINE", "COLDLINE", "ARCHIVE"] = "STANDARD"
+    versioning: bool = False
+    lifecycle: BucketLifecycle = Field(default_factory=BucketLifecycle)
+    kms_key: str | None = Field(
+        default=None,
+        description="CMEK for objects. The Cloud Storage service agent needs encrypter/decrypter on the key.",
+    )
+    access: Literal["objectViewer", "objectUser", "objectAdmin", "none"] = Field(
+        default="objectUser", description="Role granted to the runtime identity on this bucket."
+    )
+    env: str | None = Field(
+        default=None, pattern=r"^[A-Z_][A-Z0-9_]*$", description="Env var that receives the bucket name."
+    )
+    deletion_policy: Literal["retain", "delete"] = Field(
+        default="retain",
+        description="On `remove` or when dropped from agent.yaml: retain keeps the bucket and its data; "
+        "delete removes it only if it is empty. Objects are never deleted.",
+    )
+
+    @field_validator("name")
+    @classmethod
+    def _name(cls, value: str) -> str:
+        value = value.removeprefix("gs://")
+        if not _BUCKET_RE.match(value) or ".." in value or value.startswith("goog"):
+            raise ValueError(f"invalid bucket name {value!r}")
+        return value
+
+
+class Resources(_Model):
+    """Data resources agentless creates for the agent."""
+
+    buckets: dict[str, Bucket] = Field(default_factory=dict)
+
+    @field_validator("buckets")
+    @classmethod
+    def _unique(cls, value: dict[str, Bucket]) -> dict[str, Bucket]:
+        for key in value:
+            if not re.match(r"^[A-Za-z][A-Za-z0-9_-]*$", key):
+                raise ValueError(f"invalid bucket key {key!r}")
+        for attr in ("name", "env"):
+            seen = [getattr(b, attr) for b in value.values() if getattr(b, attr)]
+            if dupes := sorted({v for v in seen if seen.count(v) > 1}):
+                raise ValueError(f"duplicate bucket {attr}: {', '.join(dupes)}")
+        return value
+
+
 class Authorization(_Model):
     """OAuth authorization used by Gemini Enterprise to call the agent on the user's behalf."""
 
@@ -354,7 +420,17 @@ class AgentConfig(_Model):
     memory: Memory = Field(default_factory=Memory)
     publish: Publish = Field(default_factory=Publish)
     observability: Observability = Field(default_factory=Observability)
+    resources: Resources = Field(default_factory=Resources)
     custom: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _bucket_env(self) -> AgentConfig:
+        for key, bucket in self.resources.buckets.items():
+            if bucket.env and bucket.env in self.agent.environment:
+                raise ValueError(
+                    f"resources.buckets.{key}.env sets {bucket.env}, which agent.environment also sets; keep one"
+                )
+        return self
 
     @model_validator(mode="after")
     def _legacy_telemetry(self) -> AgentConfig:

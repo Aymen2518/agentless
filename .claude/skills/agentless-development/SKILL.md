@@ -18,7 +18,13 @@ safely.
 2. **IAM only touches what agentless added.** Owned bindings are `(type, name, role, member)` tuples in state.
    Bindings that already existed are "foreign": reported, never recorded, never revoked. Never replace a whole
    policy; always read-modify-write with etag retries (`clients.iam_modify`).
-3. **Order matters:** `serviceAccount → agentIdentity → iam → engine → geminiEnterprise` (`ALL_RESOURCES`). Deletions
+   Automatic grants (secrets, artifacts bucket, declared buckets, tracing roles) come from
+   `IamResource.automatic`/`declared`; add new ones there, never by editing a user's `identity.roles`.
+   Settings that change the deployed agent (tracing, buckets) live in `agent.yaml` only, with no CLI flag or env
+   override: a flag would make the next deploy without it revert the change. Per-run control goes through `${param:}`.
+   Buckets hold user data: never replace one and never delete objects. Releasing one means retain, or delete only
+   when it's empty.
+3. **Order matters:** `serviceAccount → agentIdentity → buckets → iam → engine → geminiEnterprise` (`ALL_RESOURCES`). Deletions
    that must wait (an old SA, an old GE registration, a superseded engine) go in `change.data["cleanup"]` or
    `state["previous"]` and run in `cleanup()` in reverse order, after every apply. A SA is never deleted while it
    still has bindings.

@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+- `resources.buckets` in `agent.yaml`: GCS buckets agentless creates and owns, for example for generated reports.
+  Uniform access and public access prevention are always on. You can set location, storage class, versioning,
+  lifecycle (`deleteAfterDays`) and CMEK. `access` grants a storage role to the runtime identity automatically,
+  and `env` injects the bucket name into the agent.
+- Buckets are never replaced and their data is never deleted. `deletionPolicy: retain` (the default) keeps a bucket
+  on `remove`, or when it's dropped from `agent.yaml`. `delete` removes it only if it's empty. A location change is
+  blocked. An existing bucket in the project is adopted and always kept.
+- `info` lists the managed buckets. The deployer needs `roles/storage.admin` when buckets are declared.
+
 ## [0.3.0] - 2026-10-08
 
 ### Added

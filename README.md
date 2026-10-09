@@ -76,8 +76,8 @@ Each deploy diffs the desired config against this record and against live GCP re
 
 | Owner | Scope |
 |---|---|
-| **agentless** (`agent.yaml`) | everything per agent: SA, IAM grants, engine config and code, Memory Bank, PSC-I, GE registration |
-| **Your infrastructure-as-code** (Terraform, etc.) | per environment: APIs, deployer SA, state bucket, telemetry dataset, and data resources (buckets, datasets, secrets) |
+| **agentless** (`agent.yaml`) | everything per agent: SA, IAM grants, buckets the agent owns (reports, outputs), engine config and code, Memory Bank, PSC-I, GE registration |
+| **Your infrastructure-as-code** (Terraform, etc.) | per environment: APIs, deployer SA, state bucket, telemetry dataset, and shared data resources (datasets, secrets, buckets used by several agents) |
 | **agents-cli** | developing the agent: scaffold, playground, eval. It reads the `deployment_metadata.json` agentless writes, so `run --url` and `publish` still work |
 
 ## Install
@@ -231,7 +231,41 @@ identity:
 | `network.pscInterface` | network attachment + DNS peering | `deploymentSpec.pscInterfaceConfig` (immutable) |
 | `memory` | sessions mode, artifacts bucket, Memory Bank models/TTL/topics | `contextSpec.memoryBankConfig` |
 | `publish.geminiEnterprise` | register in a GE app, optional OAuth authorization with scopes | Discovery Engine `agents` / `authorizations` |
+| `resources.buckets` | GCS buckets agentless creates, with access for the agent and the name in an env var | Cloud Storage buckets, bucket IAM |
 | `observability.tracing` | Cloud Trace export (on by default), prompt/response capture (off by default), runtime roles granted automatically | env vars, same as agents-cli; project IAM |
+
+### Buckets
+
+Declare the buckets an agent writes to, such as generated reports, and agentless creates them before the engine:
+
+```yaml
+resources:
+  buckets:
+    reports:
+      name: acme-reports-${stage}      # globally unique
+      location: europe-west1           # default: provider.region
+      storageClass: STANDARD           # STANDARD | NEARLINE | COLDLINE | ARCHIVE
+      versioning: false
+      lifecycle: { deleteAfterDays: 90 }
+      access: objectUser               # objectViewer | objectUser (default) | objectAdmin | none
+      env: REPORTS_BUCKET              # the agent gets REPORTS_BUCKET=acme-reports-dev
+      deletionPolicy: retain           # retain (default) | delete
+      # kmsKey: projects/…/cryptoKeys/k  # CMEK; the Cloud Storage service agent needs access to the key
+```
+
+- **Always on:** uniform bucket-level access, public access prevention, and the `agentless-*` labels plus
+  `provider.labels`. Labels set outside agentless are kept. Once `lifecycle` is managed, agentless owns the bucket's
+  lifecycle rules.
+- **Access is automatic:** the `access` role is granted to the runtime identity (service account, Agent Identity
+  principal or platform service agent). `plan` marks it `(automatic: resources.buckets)`.
+- **Reference it elsewhere** with `${self:resources.buckets.reports.name}`.
+- **Data is never deleted.** On `remove`, or when a bucket is dropped from `agent.yaml`, `retain` stops managing it
+  and leaves it with its data. `delete` removes it only if it's empty, including old object versions; otherwise it's
+  kept with a warning. Renaming a bucket creates a new, empty one. Objects are not copied.
+- **No replacement:** a different `location` is blocked, because it would need a new bucket. `--allow-replace`
+  doesn't override that.
+- **Existing buckets:** a declared bucket that already exists in the project is adopted. Its settings are aligned,
+  and it's always kept on `remove`. A name owned by another project, or one the deployer can't read, blocks the plan.
 
 ### Observability
 
@@ -320,9 +354,10 @@ needs prod's environment variables.
 - IAM is changed with read-modify-write plus etag retries. agentless only adds or removes the members it recorded as
   added itself. Bindings that already existed are reported as "not managed" and are never removed.
 - `remove` deletes only what state says agentless created. Existing service accounts, data resources and foundation
-  resources stay.
-- agentless never creates data resources (buckets, datasets, secrets). The plan blocks if a resource you grant roles
-  on doesn't exist.
+  resources stay, and buckets agentless created are kept unless `deletionPolicy: delete` and they're empty.
+- The only data resources agentless creates are buckets declared under `resources.buckets`. The plan blocks if any
+  other resource you grant roles on doesn't exist. A bucket must have one owner: don't declare one that Terraform
+  also manages.
 - An engine already deployed by `agents-cli` with the same display name is **adopted** on the first deploy (an
   update, not a duplicate), and is owned from then on.
 - Values from `${secret:}` used in `environment` or `build.args` are redacted in plan output and stored in state as
@@ -360,12 +395,12 @@ Without a TTY (CI), `deploy` applies without asking, like `serverless deploy`. W
 
 | Principal | Roles |
 |---|---|
-| Deployer (your user, a CI service account via Workload Identity Federation, or the impersonated `provider.deployer`) | `roles/aiplatform.admin`, `roles/iam.serviceAccountAdmin`, `roles/iam.serviceAccountUser`, `roles/resourcemanager.projectIamAdmin`, `roles/storage.objectAdmin` on the state bucket, `roles/secretmanager.admin` (or `setIamPolicy`) on the agent's secrets, `roles/discoveryengine.editor` to publish, `roles/monitoring.viewer` for `agentless metrics`. Org-level grants also need org IAM admin. Leave `identity.roles.organization` out until that's approved. |
+| Deployer (your user, a CI service account via Workload Identity Federation, or the impersonated `provider.deployer`) | `roles/aiplatform.admin`, `roles/iam.serviceAccountAdmin`, `roles/iam.serviceAccountUser`, `roles/resourcemanager.projectIamAdmin`, `roles/storage.objectAdmin` on the state bucket, `roles/secretmanager.admin` (or `setIamPolicy`) on the agent's secrets, `roles/discoveryengine.editor` to publish, `roles/storage.admin` when `resources.buckets` is used, `roles/monitoring.viewer` for `agentless metrics`. Org-level grants also need org IAM admin. Leave `identity.roles.organization` out until that's approved. |
 | Caller, when impersonating a deployer | `roles/iam.serviceAccountTokenCreator` on the deployer SA (and on each delegate) |
-| Runtime SA or Agent Identity principal | what `identity.roles` lists, plus automatic grants: secrets, the artifacts bucket, and with tracing on `cloudtrace.agent`, `logging.logWriter`, `monitoring.metricWriter` |
+| Runtime SA or Agent Identity principal | what `identity.roles` lists, plus automatic grants: secrets, the artifacts bucket, declared buckets, and with tracing on `cloudtrace.agent`, `logging.logWriter`, `monitoring.metricWriter` |
 
-Data resources and API enablement belong to your infrastructure-as-code (for example a Terraform foundation
-layer). agentless reads its outputs through `${tf(...)}` or params.
+Shared data resources and API enablement belong to your infrastructure-as-code (for example a Terraform
+foundation layer). Buckets owned by a single agent can live in `resources.buckets` instead. agentless reads its outputs through `${tf(...)}` or params.
 
 ## Plugins
 
@@ -502,7 +537,7 @@ docker run --rm \
 ## Status and roadmap
 
 **Verified:**
-- 125 unit tests: the variable resolver, loader, packager, CLI, and the full provider lifecycle against `FakeGcp`
+- 149 unit tests: the variable resolver, loader, packager, CLI, and the full provider lifecycle against `FakeGcp`
   (create, no-op, config-only and code-only updates, replace, adoption, identity switches, partial failures, publish,
   remove).
 - ruff and ty are clean.

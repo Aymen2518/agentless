@@ -8,7 +8,7 @@ import json
 from collections import defaultdict
 from typing import Any
 
-from agentless.config.schema import IdentityType
+from agentless.config.schema import BUCKET_ROLES, IdentityType
 from agentless.plan.model import Action, Change, Context, Resource
 from agentless.providers.agent_runtime import spec as engine_spec
 
@@ -133,6 +133,167 @@ class ServiceAccountResource(Resource):
         self._set_state(ctx, None)
 
 
+def bucket_spec(ctx: Context, key: str) -> dict[str, Any]:
+    """Settings agentless enforces on a declared bucket, in the shape `clients.bucket_get` returns."""
+    cfg = ctx.project.config
+    bucket = cfg.resources.buckets[key]
+    labels = {**cfg.provider.labels, "agentless-service": cfg.service, "agentless-stage": cfg.provider.stage}
+    return {
+        "location": (bucket.location or cfg.provider.region).upper(),
+        "storage_class": bucket.storage_class,
+        "versioning": bucket.versioning,
+        "delete_after_days": bucket.lifecycle.delete_after_days,
+        "labels": dict(sorted(labels.items())),
+        "kms_key": bucket.kms_key,
+    }
+
+
+_BUCKET_FIELDS = ("storage_class", "versioning", "delete_after_days", "kms_key")
+
+
+def _bucket_diff(desired: dict[str, Any], live: dict[str, Any]) -> list[str]:
+    diffs = [f"{f}: {live.get(f)!r} → {desired[f]!r}" for f in _BUCKET_FIELDS if live.get(f) != desired[f]]
+    # Labels set outside agentless are left alone; only ours must match.
+    labels = {k: v for k, v in desired["labels"].items() if (live.get("labels") or {}).get(k) != v}
+    diffs += [f"labels.{k}: {(live.get('labels') or {}).get(k)!r} → {v!r}" for k, v in labels.items()]
+    return diffs
+
+
+def _bucket_line(name: str, spec: dict[str, Any], env: str | None) -> str:
+    extras = [spec["location"].lower(), spec["storage_class"]]
+    if spec["versioning"]:
+        extras.append("versioned")
+    if spec["delete_after_days"]:
+        extras.append(f"delete after {spec['delete_after_days']}d")
+    return f"{name} ({', '.join(extras)})" + (f" → ${env}" if env else "")
+
+
+class BucketsResource(Resource):
+    """GCS buckets declared under resources.buckets. Data is never deleted: buckets are retained or removed empty."""
+
+    key = "buckets"
+
+    def _items(self, ctx: Context) -> dict[str, dict[str, Any]]:
+        return dict(self._state(ctx).get("items") or {})
+
+    def _save(self, ctx: Context, items: dict[str, dict[str, Any]]) -> None:
+        self._set_state(ctx, {"items": dict(sorted(items.items()))} if items else None)
+
+    def plan(self, ctx: Context) -> Change:  # noqa: D102
+        cfg = ctx.project.config
+        items = self._items(ctx)
+        ops: dict[str, Any] = {"create": [], "update": {}, "adopt": [], "release": []}
+        details: list[str] = []
+        blocked: list[str] = []
+        declared = {b.name: key for key, b in cfg.resources.buckets.items()}
+        for name, key in sorted(declared.items()):
+            bucket, desired = cfg.resources.buckets[key], bucket_spec(ctx, key)
+            live = ctx.clients.bucket_get(name)
+            tracked = items.get(name)
+            if live is None:
+                ops["create"].append(name)
+                note = " (missing, recreated empty)" if tracked else ""
+                details.append(f"+ {_bucket_line(name, desired, bucket.env)}{note}")
+                continue
+            if live.get("forbidden"):
+                blocked.append(f"{name} exists but the deployer cannot read it; the name may belong to another project")
+                continue
+            if live.get("project_number") and live["project_number"] != ctx.clients.project_number():
+                blocked.append(f"{name} belongs to another project; bucket names are global, pick another name")
+                continue
+            if live["location"].upper() != desired["location"]:
+                blocked.append(
+                    f"{name} is in {live['location'].lower()}, agent.yaml says {desired['location'].lower()}: "
+                    "a bucket's location can't change and agentless never replaces a bucket; use a new name"
+                )
+                continue
+            diffs = _bucket_diff(desired, live)
+            if not tracked:
+                ops["adopt"].append(name)
+                details.append(f"⇐ adopt {name} (exists in this project, kept on remove)")
+            if diffs:
+                ops["update"][name] = diffs
+                details += [f"~ {name} {d}" for d in diffs]
+        for name, entry in sorted(items.items()):
+            if name in declared:
+                continue
+            ops["release"].append(name)
+            if entry.get("created") and entry.get("deletionPolicy") == "delete":
+                details.append(f"- {name}: delete if empty (deletionPolicy: delete), otherwise kept")
+            else:
+                details.append(f"- {name}: stop managing; bucket and data kept")
+        pending = ops["create"] or ops["update"] or ops["adopt"] or ops["release"]
+        reason = "; ".join(blocked) or None
+        if not pending:
+            summary = f"{len(declared)} managed bucket(s)" if declared else "none declared"
+            return Change(self.key, Action.NOOP, summary, details, blocked=reason)
+        if not declared:
+            action = Action.DELETE
+        elif items or ops["adopt"]:
+            action = Action.UPDATE
+        else:
+            action = Action.CREATE
+        counts = {"create": len(ops["create"]), "update": len(ops["update"]), "release": len(ops["release"])}
+        summary = ", ".join(f"{n} to {verb}" for verb, n in counts.items() if n) or f"adopt {len(ops['adopt'])}"
+        if ops["adopt"] and any(counts.values()):
+            summary += f", adopt {len(ops['adopt'])}"
+        return Change(self.key, action, summary, details, data=ops, blocked=reason)
+
+    def apply(self, ctx: Context, change: Change) -> None:  # noqa: D102
+        cfg = ctx.project.config
+        declared = {b.name: key for key, b in cfg.resources.buckets.items()}
+        items = self._items(ctx)
+        for name, key in sorted(declared.items()):
+            spec, policy = bucket_spec(ctx, key), cfg.resources.buckets[key].deletion_policy
+            if name in change.data.get("create", []):
+                ctx.clients.bucket_create(name, spec)
+                items[name] = {"key": key, "created": True, "deletionPolicy": policy}
+            else:
+                if name in change.data.get("update", {}):
+                    ctx.clients.bucket_update(name, spec)
+                entry = items.get(name) or {"created": False}
+                items[name] = {**entry, "key": key, "deletionPolicy": policy}
+            self._save(ctx, items)  # per bucket, so a later failure never loses track of one just created
+        for name in change.data.get("release", []):
+            items.setdefault(name, {})["release"] = True  # handled in cleanup, after IAM and the engine moved on
+        self._save(ctx, items)
+
+    def cleanup(self, ctx: Context, change: Change) -> None:  # noqa: D102
+        items = self._items(ctx)
+        for name in change.data.get("release", []):
+            entry = items.pop(name, None) or {}
+            self._release(ctx, name, entry)
+            self._save(ctx, items)
+
+    def _release(self, ctx: Context, name: str, entry: dict[str, Any]) -> None:
+        if not (entry.get("created") and entry.get("deletionPolicy") == "delete"):
+            ctx.echo(f"    {name}: kept (no longer managed by agentless)")
+            return
+        if not ctx.clients.bucket_is_empty(name):
+            ctx.echo(f"    ⚠ {name}: not empty, kept (no longer managed by agentless)")
+            return
+        ctx.clients.bucket_delete(name)
+        ctx.echo(f"    {name}: deleted (was empty)")
+
+    def plan_destroy(self, ctx: Context) -> Change:  # noqa: D102
+        items = self._items(ctx)
+        if not items:
+            return Change(self.key, Action.NOOP, "none")
+        details = []
+        for name, entry in sorted(items.items()):
+            if entry.get("created") and entry.get("deletionPolicy") == "delete":
+                details.append(f"- {name}: delete if empty, otherwise kept")
+            else:
+                details.append(f"= {name}: kept with its data")
+        return Change(self.key, Action.DELETE, f"release {len(items)} bucket(s)", details)
+
+    def destroy(self, ctx: Context) -> None:  # noqa: D102
+        items = self._items(ctx)
+        for name in sorted(items):
+            self._release(ctx, name, items.pop(name))
+            self._save(ctx, items)
+
+
 class AgentIdentityResource(Resource):
     """Bare engine created first so the Agent Identity principal exists before IAM and code."""
 
@@ -189,7 +350,9 @@ def _target(k: IamKey) -> str:
 
 
 def _why(k: IamKey, automatic: set[IamKey]) -> str:
-    return " (automatic: tracing)" if k in automatic else ""
+    if k not in automatic:
+        return ""
+    return " (automatic: resources.buckets)" if k[0] == "bucket" else " (automatic: tracing)"
 
 
 TRACING_ROLES = ("roles/cloudtrace.agent", "roles/logging.logWriter", "roles/monitoring.metricWriter")
@@ -224,14 +387,19 @@ class IamResource(Resource):
 
     @staticmethod
     def automatic(ctx: Context, member: str) -> set[IamKey]:
-        """Bindings agentless adds on its own: what tracing needs to write spans, logs and metrics.
+        """Bindings agentless adds on its own: access to declared buckets, and what tracing needs.
 
-        The platform service agent already holds them through its own role, so it gets nothing extra.
+        The platform service agent already holds the tracing roles through its own role, so it gets none of those.
         """
         cfg = ctx.project.config
-        if not cfg.observability.tracing.enabled or cfg.identity.type == IdentityType.PLATFORM:
-            return set()
-        return {("project", cfg.provider.project, role, member) for role in TRACING_ROLES}
+        out: set[IamKey] = {
+            ("bucket", b.name, BUCKET_ROLES[b.access], member)
+            for b in cfg.resources.buckets.values()
+            if b.access != "none"
+        }
+        if cfg.observability.tracing.enabled and cfg.identity.type != IdentityType.PLATFORM:
+            out |= {("project", cfg.provider.project, role, member) for role in TRACING_ROLES}
+        return out
 
     def _owned(self, ctx: Context) -> set[IamKey]:
         return {tuple(b) for b in self._state(ctx).get("bindings", [])}  # type: ignore[misc]
@@ -272,13 +440,15 @@ class IamResource(Resource):
         desired = self.desired(ctx, member)
         auto = self._auto_only(ctx, member)
         to_add, to_remove, foreign, missing = self._diff(ctx, desired)
-        missing_desired = sorted({_target(k) for k in desired if _target(k) in missing})
+        # Buckets declared under resources.buckets are created by the buckets step, before IAM runs.
+        created = {f"bucket/{b.name}" for b in ctx.project.config.resources.buckets.values()}
+        missing_desired = sorted({_target(k) for k in desired if _target(k) in missing and _target(k) not in created})
         details = [f"+ {k[2]} on {_target(k)} → {k[3]}{_why(k, auto)}" for k in sorted(to_add)]
         details += [f"- {k[2]} on {_target(k)} → {k[3]}" for k in sorted(to_remove)]
         details += [f"= {k[2]} on {_target(k)} (already granted, not managed)" for k in sorted(foreign)]
         blocked = (
             f"target resources do not exist: {', '.join(missing_desired)} "
-            "(agentless grants access to data resources, it does not create them)"
+            "(declare buckets under resources.buckets to have agentless create them)"
             if missing_desired
             else None
         )
@@ -698,6 +868,7 @@ def _hash(value: Any) -> str:
 ALL_RESOURCES: tuple[type[Resource], ...] = (
     ServiceAccountResource,
     AgentIdentityResource,
+    BucketsResource,
     IamResource,
     EngineResource,
     GeminiEnterpriseResource,

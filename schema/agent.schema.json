@@ -118,6 +118,125 @@
       "title": "Authorization",
       "type": "object"
     },
+    "Bucket": {
+      "additionalProperties": false,
+      "description": "A GCS bucket agentless creates and owns, with access granted to the agent's runtime identity.",
+      "properties": {
+        "name": {
+          "description": "Globally unique bucket name, e.g. acme-reports-${stage}.",
+          "title": "Name",
+          "type": "string"
+        },
+        "location": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Region or multi-region; defaults to provider.region.",
+          "title": "Location"
+        },
+        "storageClass": {
+          "default": "STANDARD",
+          "enum": [
+            "STANDARD",
+            "NEARLINE",
+            "COLDLINE",
+            "ARCHIVE"
+          ],
+          "title": "Storageclass",
+          "type": "string"
+        },
+        "versioning": {
+          "default": false,
+          "title": "Versioning",
+          "type": "boolean"
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/BucketLifecycle"
+        },
+        "kmsKey": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "CMEK for objects. The Cloud Storage service agent needs encrypter/decrypter on the key.",
+          "title": "Kmskey"
+        },
+        "access": {
+          "default": "objectUser",
+          "description": "Role granted to the runtime identity on this bucket.",
+          "enum": [
+            "objectViewer",
+            "objectUser",
+            "objectAdmin",
+            "none"
+          ],
+          "title": "Access",
+          "type": "string"
+        },
+        "env": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Z_][A-Z0-9_]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Env var that receives the bucket name.",
+          "title": "Env"
+        },
+        "deletionPolicy": {
+          "default": "retain",
+          "description": "On `remove` or when dropped from agent.yaml: retain keeps the bucket and its data; delete removes it only if it is empty. Objects are never deleted.",
+          "enum": [
+            "retain",
+            "delete"
+          ],
+          "title": "Deletionpolicy",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "Bucket",
+      "type": "object"
+    },
+    "BucketLifecycle": {
+      "additionalProperties": false,
+      "description": "Object lifecycle; agentless owns the bucket's lifecycle rules once this is set.",
+      "properties": {
+        "deleteAfterDays": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Delete objects older than this.",
+          "title": "Deleteafterdays"
+        }
+      },
+      "title": "BucketLifecycle",
+      "type": "object"
+    },
     "Build": {
       "additionalProperties": false,
       "description": "Container build settings (sourceCodeSpec.imageSpec).",
@@ -598,6 +717,21 @@
       "title": "ResourceRoles",
       "type": "object"
     },
+    "Resources": {
+      "additionalProperties": false,
+      "description": "Data resources agentless creates for the agent.",
+      "properties": {
+        "buckets": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Bucket"
+          },
+          "title": "Buckets",
+          "type": "object"
+        }
+      },
+      "title": "Resources",
+      "type": "object"
+    },
     "Roles": {
       "additionalProperties": false,
       "description": "Least-privilege grants for the agent's identity.",
@@ -878,6 +1012,9 @@
     },
     "observability": {
       "$ref": "#/$defs/Observability"
+    },
+    "resources": {
+      "$ref": "#/$defs/Resources"
     },
     "custom": {
       "additionalProperties": true,
