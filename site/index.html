@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agentless: deploy ADK agents to Agent Runtime from one file</title>
+<meta name="description" content="agentless deploys ADK agents to Google Cloud Agent Platform from a single agent.yaml: service account, IAM, reasoning engine, Memory Bank, networking and Gemini Enterprise registration, with a real plan before every change.">
+<meta property="og:title" content="agentless: deploy ADK agents from one file">
+<meta property="og:description" content="Serverless Framework–style deployments for ADK agents on Google Cloud Agent Runtime. One agent.yaml, one command, a real plan.">
+<meta property="og:type" content="website">
+<meta name="theme-color" content="#0a0c17">
+<link rel="icon" type="image/svg+xml" href="assets/icon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wdth,wght@12..96,75..100,300..800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<canvas id="field" aria-hidden="true"></canvas>
+<div class="progress" aria-hidden="true"><i></i></div>
+
+<nav class="nav">
+  <div class="wrap nav-in">
+    <a class="logo" href="./" aria-label="agentless home">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><rect x="1.5" y="1.5" width="29" height="29" rx="8" class="logo-box"/><path d="M9 10.5h9M9 16h14M9 21.5h6" class="logo-lines"/><circle cx="23" cy="21.5" r="2.6" class="logo-dot"/></svg>
+      <span>agentless</span>
+    </a>
+    <div class="links">
+      <a class="hide" href="#how">How it works</a>
+      <a class="hide" href="#demo">Demo</a>
+      <a class="hide" href="#features">Features</a>
+      <a class="hide" href="#compare">Compare</a>
+      <a href="https://github.com/Aymen2518/agentless#readme">Docs</a>
+      <a class="gh" href="https://github.com/Aymen2518/agentless">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<header class="wrap hero">
+  <div class="hero-copy">
+    <p class="badge"><span class="pulse"></span>v0.4.0, open source under Apache-2.0</p>
+    <h1 id="headline" aria-label="Deploy ADK agents from one file.">
+      <span class="line" data-scramble>Deploy ADK agents</span>
+      <span class="line" data-scramble>from one file.</span>
+    </h1>
+    <p class="lead">You build the agent with <code>agents-cli</code>. You describe where and how it runs in <code>agent.yaml</code>. agentless works out what changed against what's deployed on Agent Runtime and applies only that: service account, IAM, reasoning engine, Memory Bank, networking and Gemini Enterprise.</p>
+    <div class="cta">
+      <a class="btn primary magnetic" href="https://github.com/Aymen2518/agentless#quick-start"><span>Get started</span></a>
+      <a class="btn ghost magnetic" href="https://github.com/Aymen2518/agentless#agentyaml"><span>agent.yaml reference</span></a>
+    </div>
+    <div class="install">
+      <span class="prompt">$</span><code id="cmd">brew install Aymen2518/tap/agentless</code>
+      <button class="copy" data-copy="#cmd" type="button">Copy</button>
+    </div>
+    <p class="also">macOS and Linux. Also with <a href="https://github.com/Aymen2518/agentless#uv-pipx-or-docker">uv, pipx</a> or the <a href="https://github.com/Aymen2518/agentless#container-image">container image</a>.</p>
+  </div>
+
+  <!-- The reconciler: agent.yaml on the left, the five resources it becomes on the right. -->
+  <div class="reconciler" id="reconciler" aria-label="Animation: agent.yaml is planned and applied as five Agent Runtime resources">
+    <div class="rc-head">
+      <span class="dots"><i></i><i></i><i></i></span>
+      <span class="rc-title">~/report-agent</span>
+      <button class="rc-replay" type="button" aria-label="Replay animation">Replay</button>
+    </div>
+    <div class="rc-body">
+      <pre class="rc-yaml" id="rc-yaml"></pre>
+      <svg class="rc-wires" id="rc-wires" aria-hidden="true"></svg>
+      <ol class="rc-nodes" id="rc-nodes">
+        <li data-node="serviceAccount"><b class="sym">+</b><span><strong>serviceAccount</strong><em>sa-report-agent-dev</em></span></li>
+        <li data-node="agentIdentity"><b class="sym">=</b><span><strong>agentIdentity</strong><em>not used by this identity</em></span></li>
+        <li data-node="iam"><b class="sym">+</b><span><strong>iam</strong><em>4 bindings</em></span></li>
+        <li data-node="engine"><b class="sym">+</b><span><strong>engine</strong><em>2 vCPU, 4Gi, 0 to 5 instances</em></span></li>
+        <li data-node="geminiEnterprise"><b class="sym">+</b><span><strong>geminiEnterprise</strong><em>acme-assistant</em></span></li>
+      </ol>
+    </div>
+    <div class="rc-foot" id="rc-foot"><span class="c">$</span> agentless deploy --stage dev</div>
+  </div>
+</header>
+
+<!-- Before / after: three tools collapse into one file as you scroll. -->
+<section class="collapse" id="why">
+  <div class="sticky">
+    <div class="wrap collapse-in">
+      <div class="collapse-copy">
+        <h2>Three tools, one file</h2>
+        <p class="sub">Deploying an agent used to mean a Terraform module per agent, a dozen <code>agents-cli deploy</code> flags living in someone's shell history, and a separate publish step. Labels and Memory Bank weren't exposed anywhere, and nothing showed what a deploy would change.</p>
+        <p class="sub collapse-after">Now it's one declarative file per agent, with stages and variables, and one command that reconciles the cloud with it.</p>
+      </div>
+      <div class="collapse-stage" id="collapse-stage">
+        <div class="shard s1"><span class="shard-t">deployment/terraform/</span><pre>resource "google_service_account" "agent" {…}
+resource "google_project_iam_member" "x" {…}
+resource "google_storage_bucket" "b" {…}
+resource "google_vertex_ai_reasoning_engine"…</pre></div>
+        <div class="shard s2"><span class="shard-t">DEPLOYMENT.md</span><pre>agents-cli deploy \
+  --service-account sa-…@….iam \
+  --update-env-vars LOG_LEVEL=info,… \
+  --secrets SLACK_TOKEN=slack-token:latest \
+  --min-instances 0 --max-instances 5 …</pre></div>
+        <div class="shard s3"><span class="shard-t">publish.sh</span><pre>agents-cli publish gemini-enterprise \
+  --app acme-assistant --engine $ENGINE_ID</pre></div>
+        <div class="one-file" aria-hidden="true">
+          <span class="shard-t">agent.yaml</span>
+          <pre><span class="k">service</span>: report-agent
+<span class="k">provider</span>: { project: <span class="s">${param:project}</span> }
+<span class="k">agent</span>: { runtime: { cpu: <span class="s">"2"</span> } }
+<span class="k">identity</span>: { type: serviceAccount }
+<span class="k">publish</span>: { geminiEnterprise: … }</pre>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Pipeline: a beam travels through every stage of a deploy, scrubbed by scroll. -->
+<section class="pipeline" id="how">
+  <div class="sticky">
+    <div class="wrap">
+      <h2>What happens when you run <code class="h2code">deploy</code></h2>
+      <p class="sub">Every step after packaging reads the live project and the state record first, so a deploy changes only what differs. Scroll to follow one through.</p>
+      <div class="rail" id="rail">
+        <div class="rail-track"><i class="rail-beam" id="rail-beam"></i></div>
+        <ol class="stages" id="stages">
+          <li><b>load</b><p>Read <code>agent.yaml</code> and pick the stage.</p></li>
+          <li><b>resolve</b><p><code>${param:}</code>, <code>${secret:}</code>, <code>${tf():}</code> for the selected stage only.</p></li>
+          <li><b>validate</b><p>Pydantic, against the agents-cli manifest. Errors point at the YAML path.</p></li>
+          <li><b>package</b><p>Same files agents-cli would upload, with their sha256. Offline.</p></li>
+          <li><b>lock</b><p>One GCS object per service and stage, guarded by generation preconditions.</p></li>
+          <li><b>plan</b><p>Diff each resource against state and live GCP reads.</p></li>
+          <li><b>apply</b><p>In order, saving state after each resource. Deletions run last.</p></li>
+          <li><b>save state</b><p>Plus <code>deployment_metadata.json</code>, so <code>agents-cli run --url</code> still works.</p></li>
+        </ol>
+      </div>
+      <pre class="rail-log" id="rail-log" aria-live="off"></pre>
+    </div>
+  </div>
+</section>
+
+<!-- Demo: a scripted terminal session with chapters. -->
+<section class="demo wrap" id="demo">
+  <h2>See a deploy, start to finish</h2>
+  <p class="sub">A scripted session against sample names (<code>acme-agents-dev</code>). Waits are shortened. Pick a chapter, pause, or copy the commands.</p>
+  <div class="term" id="term">
+    <div class="term-bar">
+      <span class="dots"><i></i><i></i><i></i></span>
+      <div class="chapters" id="chapters" role="tablist" aria-label="Demo chapters"></div>
+      <div class="term-ctl">
+        <button type="button" id="t-play" aria-label="Pause">Pause</button>
+        <button type="button" id="t-copy">Copy commands</button>
+      </div>
+    </div>
+    <pre class="term-out" id="term-out" aria-live="polite"></pre>
+    <div class="term-progress"><i id="t-prog"></i></div>
+  </div>
+</section>
+
+<!-- Lifecycle: apply in order, destroy in reverse. -->
+<section class="life wrap" id="lifecycle">
+  <div class="life-copy">
+    <h2>Applied in order, removed in reverse</h2>
+    <p class="sub">Five resources, always in the same order. A service account is never deleted while it still has bindings, and <code>remove</code> deletes only what the state record says agentless created.</p>
+    <div class="seg" role="radiogroup" aria-label="Lifecycle direction">
+      <button type="button" role="radio" aria-checked="true" data-dir="deploy">deploy</button>
+      <button type="button" role="radio" aria-checked="false" data-dir="remove">remove</button>
+    </div>
+  </div>
+  <div class="life-graph" id="life-graph">
+    <svg class="life-svg" id="life-svg" aria-hidden="true"></svg>
+    <div class="ln" data-i="0"><b>1</b><strong>serviceAccount</strong><span>runtime SA, created or an existing one referenced</span></div>
+    <div class="ln" data-i="1"><b>2</b><strong>agentIdentity</strong><span>bare engine that mints the Agent Identity principal</span></div>
+    <div class="ln" data-i="2"><b>3</b><strong>iam</strong><span>project, org, bucket, secret, dataset and SA bindings</span></div>
+    <div class="ln" data-i="3"><b>4</b><strong>engine</strong><span>config with update masks; code rebuilt only when the hash changes</span></div>
+    <div class="ln" data-i="4"><b>5</b><strong>geminiEnterprise</strong><span>registration in a GE app, plus its OAuth authorization</span></div>
+  </div>
+</section>
+
+<section class="features wrap" id="features">
+  <h2>Everything an Agent Runtime deploy needs</h2>
+  <p class="sub">The things that used to be split between Terraform, deploy flags and a publish script, in one file that agentless owns end to end.</p>
+  <div class="grid">
+    <article class="card"><svg class="ic" viewBox="0 0 24 24"><path d="M4 6h16M4 12h10M4 18h6"/><path d="M17 15l3 3-3 3"/></svg><h3>A real plan</h3><p><code>agentless plan</code> diffs every resource before anything changes. <code>--detailed-exitcode</code> exits 2 when there's work to do, for CI.</p></article>
+    <article class="card"><svg class="ic" viewBox="0 0 24 24"><path d="M12 3v6M12 15v6M3 12h6M15 12h6"/><circle cx="12" cy="12" r="3"/></svg><h3>Minimal engine updates</h3><p>Config changes go out with an <code>update_mask</code> and no rebuild. Code is rebuilt only when the source hash changes.</p></article>
+    <article class="card"><svg class="ic" viewBox="0 0 24 24"><path d="M12 2l8 3v6c0 5-3.5 9-8 11-4.5-2-8-6-8-11V5z"/><path d="M9 12l2 2 4-4"/></svg><h3>IAM it won't overreach</h3><p>Read-modify-write with etag retries. agentless removes only the members it added. Existing bindings show as "not managed".</p></article>
+    <article class="card"><svg class="ic" viewBox="0 0 24 24"><circle cx="9" cy="8" r="4"/><path d="M2 21c0-4 3-6 7-6M16 11l2 2 4-4"/></svg><h3>Three identity types</h3><p>The platform service agent, a service account it creates or one you reference, or an Agent Identity principal (preview).</p></article>
+    <article class="card"><svg class="ic" viewBox="0 0 24 24"><path d="M4 7c0-2 3.5-3 8-3s8 1 8 3-3.5 3-8 3-8-1-8-3z"/><path d="M4 7v10c0 2 3.5 3 8 3s8-1 8-3V7"/></svg><h3>Buckets without data loss</h3><p>Declare the buckets an agent writes to. Access is granted automatically, and data is never deleted on <code>remove</code>.</p></article>
+    <article class="card"><svg class="ic" viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg><h3>Tracing, logs, metrics</h3><p>Cloud Trace is on by default, with its roles granted for you. <code>logs</code>, <code>metrics</code> and <code>open traces</code> read it back.</p></article>
+    <article class="card"><svg class="ic" viewBox="0 0 24 24"><path d="M12 3a7 7 0 0 0-4 12.7V18h8v-2.3A7 7 0 0 0 12 3z"/><path d="M9 21h6"/></svg><h3>Memory Bank and sessions</h3><p>Sessions mode, an artifacts bucket, and Memory Bank models, TTL and topics, set from the <code>memory</code> block.</p></article>
+    <article class="card"><svg class="ic" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M8 12h8M12 8v8"/></svg><h3>Gemini Enterprise publishing</h3><p>Registration in a GE app, with an optional OAuth authorization and scopes. No separate publish step.</p></article>
+    <article class="card"><svg class="ic" viewBox="0 0 24 24"><circle cx="5" cy="12" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="19" cy="18" r="2"/><path d="M7 11l10-4M7 13l10 4"/></svg><h3>Private networking and CMEK</h3><p>PSC-I with DNS peering, and customer-managed keys. Immutable changes stop the plan (✋) unless you pass <code>--allow-replace</code>.</p></article>
+    <article class="card"><svg class="ic" viewBox="0 0 24 24"><path d="M7 4h10l3 3v13H4V4h3z"/><path d="M8 13h8M8 17h5"/></svg><h3>Variables from anywhere</h3><p>Serverless syntax plus <code>${secret:}</code> from Secret Manager and <code>${tf(gs://…):output}</code> from Terraform remote state.</p></article>
+    <article class="card"><svg class="ic" viewBox="0 0 24 24"><path d="M20 11a8 8 0 0 0-14.9-3M4 13a8 8 0 0 0 14.9 3"/><path d="M4 4v4h4M20 20v-4h-4"/></svg><h3>Adopts agents-cli deploys</h3><p>An engine already deployed with the same display name is updated, not duplicated. <code>agents-cli run</code> and <code>publish</code> keep working.</p></article>
+    <article class="card"><svg class="ic" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg><h3>Deploy as a service account</h3><p>Impersonate a deployer per stage, from the CLI, an env var or <code>provider.deployer</code>. Workload Identity Federation in CI.</p></article>
+  </div>
+</section>
+
+<section class="compare wrap" id="compare">
+  <h2>Where agentless fits</h2>
+  <p class="sub">Keep Terraform for what's shared across an environment: APIs, the deployer, the state bucket, datasets and secrets used by several agents. agentless owns everything that belongs to one agent.</p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th scope="col"></th><th scope="col">Terraform per agent + <code>agents-cli deploy</code></th><th scope="col">agentless</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">Files per agent</th><td>a Terraform module, deploy flags, a publish script</td><td class="best">one <code>agent.yaml</code></td></tr>
+        <tr><th scope="row">See changes first</th><td><code>terraform plan</code> covers infra only; the engine deploy has no diff</td><td class="best">one plan for SA, IAM, engine and GE</td></tr>
+        <tr><th scope="row">Unchanged code</th><td>rebuilt on every deploy</td><td class="best">skipped by source hash</td></tr>
+        <tr><th scope="row">Stages</th><td>tfvars plus per-env flag sets</td><td class="best"><code>stages.&lt;stage&gt;.params</code></td></tr>
+        <tr><th scope="row">Memory Bank, labels</th><td>not exposed</td><td class="best">in the file</td></tr>
+        <tr><th scope="row">Gemini Enterprise</th><td>a separate <code>publish</code> run</td><td class="best">part of the deploy</td></tr>
+        <tr><th scope="row">Clean removal</th><td>by hand</td><td class="best"><code>remove</code> deletes only what it created</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="final wrap">
+  <h2 class="final-h">Ship your next agent with one command.</h2>
+  <div class="install big">
+    <span class="prompt">$</span><code id="cmd2">agentless deploy --stage dev</code>
+    <button class="copy" data-copy="#cmd2" type="button">Copy</button>
+  </div>
+  <div class="cta center">
+    <a class="btn primary magnetic" href="https://github.com/Aymen2518/agentless#quick-start"><span>Get started</span></a>
+    <a class="btn ghost magnetic" href="https://github.com/Aymen2518/agentless"><span>Star on GitHub</span></a>
+  </div>
+</section>
+
+<footer class="wrap foot">
+  <span>agentless, Apache-2.0. Not affiliated with Google. Google Cloud and Gemini are trademarks of Google LLC.</span>
+  <span class="foot-links">
+    <a href="https://github.com/Aymen2518/agentless#readme">Docs</a>
+    <a href="https://github.com/Aymen2518/agentless#status-and-roadmap">Roadmap</a>
+    <a href="https://github.com/Aymen2518/agentless/blob/main/CHANGELOG.md">Changelog</a>
+    <a href="https://github.com/Aymen2518/agentless">GitHub</a>
+  </span>
+</footer>
+
+<script src="app.js" defer></script>
+</body>
+</html>
