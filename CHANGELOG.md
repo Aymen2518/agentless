@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-15
+
 ### Added
 - `publish.agentRegistry`: registers an A2A agent's card as an `A2A_AGENT_CARD` service in the Agent Registry, where
   Agent Gateways govern it. The card is read from the deployed engine; `plan` shows card drift, and a code deploy
@@ -117,6 +119,7 @@ First public release: wheel and sdist (`agentless-cli`) on the GitHub Release, a
 - Multi-arch container image and Claude Code skills for developing agentless and deploying agents with it.
 
 [Unreleased]: https://github.com/Aymen2518/agentless/compare/v0.4.0...HEAD
+[0.5.0]: https://github.com/Aymen2518/agentless/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Aymen2518/agentless/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Aymen2518/agentless/compare/v0.2.3...v0.3.0
 [0.2.3]: https://github.com/Aymen2518/agentless/compare/v0.2.2...v0.2.3
