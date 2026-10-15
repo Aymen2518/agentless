@@ -6,6 +6,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+- `publish.agentRegistry`: registers an A2A agent's card as an `A2A_AGENT_CARD` service in the Agent Registry, where
+  Agent Gateways govern it. The card is read from the deployed engine; `plan` shows card drift, and a code deploy
+  refreshes it in the same run. Renames register the new service before deleting the old one.
+- `publish.geminiEnterprise.registration: a2a` registers the agent card in Gemini Enterprise instead of the ADK
+  engine (default stays `adk`), with the authorization attached as `agentAuthorization`. Switching modes replaces
+  the registration.
+- `publish.geminiEnterprise.sharing: allUsers`, and `agentGateway`, which sets the app's egress Agent Gateway when
+  the app has none. A different gateway already on the app is left alone with a warning, and nothing is reverted.
+- `access.invokers`, and an automatic `roles/aiplatform.user` for the Gemini Enterprise app's Discovery Engine
+  service agent (`grantServiceAgent`, on by default). Both are grant-only: added when missing, never revoked.
+- `authorization.displayName`; the authorization now also sends its `scopes` field.
+- The deployer needs `roles/agentregistry.editor` for `publish.agentRegistry`.
+
+### Fixed
+- `info` printed an `a2aCardUrl` without the `/api` passthrough segment; it now matches agents-cli.
+- A Gemini Enterprise app move interrupted between registering the new agent and removing the old one no longer
+  leaks the old registration: the next `plan` finishes the cleanup.
+
 ## [0.4.0] - 2026-10-08
 
 ### Added

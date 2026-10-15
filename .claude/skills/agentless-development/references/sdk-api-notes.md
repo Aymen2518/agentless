@@ -72,5 +72,28 @@ agents-cli 1.3.1 source (`~/.local/share/uv/tools/google-agents-cli/.../google/a
   {tool_authorizations: [<auth name>]}}`. An existing registration is matched on
   `adkAgentDefinition.provisionedReasoningEngine.reasoningEngine`.
 - **Authorizations:** `projects/{n}/locations/{loc}/authorizations/{id}`. POST with `?authorizationId=`, or PATCH
-  with `?updateMask=serverSideOauth2`. Body: `{serverSideOauth2: {clientId, clientSecret, authorizationUri (scopes in
-  the query string, redirect_uri=https://vertexaisearch.cloud.google.com/static/oauth/oauth.html), tokenUri}}`.
+  with `?updateMask=displayName,serverSideOauth2`. Body: `{displayName, serverSideOauth2: {clientId, clientSecret,
+  authorizationUri (scopes in the query string,
+  redirect_uri=https://vertexaisearch.cloud.google.com/static/oauth/oauth.html), tokenUri, scopes}}`.
+- **A2A payload** (agents-cli 1.3.1 `register_a2a_agent`): `{displayName, description, icon, a2a_agent_definition:
+  {json_agent_card: <card as a JSON string>}, authorization_config: {agent_authorization: <auth name>}}`. An
+  existing registration is matched on the stored card's `url` (the A2A endpoint, not the well-known fetch URL).
+  agents-cli warns that A2A registration on Agent Runtime is not recommended; `adk` stays the default.
+- **Sharing:** `sharing_config: {scope: "ALL_USERS"}`, masked only when set (a masked field sent empty is reset).
+  `authorization_config` is always masked, so a dropped authorization is cleared.
+- **App egress gateway:** `GET {app}` → `agentGatewaySetting.defaultEgressAgentGateway.name`; set with
+  `PATCH {app}?updateMask=agentGatewaySetting.defaultEgressAgentGateway.name`. A `global` app pairs with a gateway in
+  `us-central1`, an `eu` app with `europe-west1` (from the LuminAI Terraform; Google enforces the pairing).
+
+## A2A card (Agent Runtime)
+- **Card URL** (agents-cli `_agent_runtime_a2a.py`):
+  `https://{region}-aiplatform.googleapis.com/reasoningEngines/v1/{engine}/api/a2a/{agentDirectory}/.well-known/agent-card.json`,
+  fetched with an access token. The card's `url` is the same path without `/.well-known/agent-card.json`.
+
+## Agent Registry (v1alpha REST)
+- **Endpoint:** `https://agentregistry.googleapis.com/v1alpha/projects/{p}/locations/{loc}/services/{id}`: GET,
+  POST on `.../services?serviceId=`, `PATCH ?updateMask=agentSpec,displayName,description`, DELETE.
+- **Body:** `{displayName, description, agentSpec: {type: "A2A_AGENT_CARD", content: <card object>}}`.
+- Shapes come from the LuminAI Terraform scripts, which register Conversational Analytics cards. Those needed
+  `additionalInterfaces` removed and `protocolVersion: "1.0"` dropped; check whether ADK cards need the same on the
+  first live run.

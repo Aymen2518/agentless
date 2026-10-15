@@ -105,10 +105,23 @@ def _env(project: Project, engine_name: str | None) -> dict[str, str]:
     )
     env.setdefault("ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS", str(tracing.capture_content).lower())
     if engine_name:
-        env.setdefault(
-            "APP_URL", f"https://{cfg.provider.region}-aiplatform.googleapis.com/reasoningEngines/v1/{engine_name}/api"
-        )
+        env.setdefault("APP_URL", app_url(cfg.provider.region, engine_name))
     return env
+
+
+def app_url(region: str, engine_name: str) -> str:
+    """HTTP passthrough root of an engine; the A2A routes live under it."""
+    return f"https://{region}-aiplatform.googleapis.com/reasoningEngines/v1/{engine_name}/api"
+
+
+def a2a_url(region: str, engine_name: str, agent_directory: str) -> str:
+    """A2A endpoint of an engine: the `url` its agent card advertises (same format as agents-cli)."""
+    return f"{app_url(region, engine_name)}/a2a/{agent_directory}"
+
+
+def a2a_card_url(region: str, engine_name: str, agent_directory: str) -> str:
+    """Well-known agent-card URL of an engine."""
+    return f"{a2a_url(region, engine_name, agent_directory)}/.well-known/agent-card.json"
 
 
 def _project_version(project: Project) -> str | None:

@@ -384,6 +384,7 @@ class Authorization(_Model):
     """OAuth authorization used by Gemini Enterprise to call the agent on the user's behalf."""
 
     id: str
+    display_name: str | None = Field(default=None, description="Shown on the consent prompt; defaults to the id.")
     client_id: str
     client_secret: str
     scopes: list[str]
@@ -398,13 +399,65 @@ class GeminiEnterprise(_Model):
     display_name: str | None = None
     description: str | None = None
     tool_description: str | None = None
+    registration: Literal["adk", "a2a"] = Field(
+        default="adk",
+        description="adk: Gemini Enterprise calls the engine natively (recommended on Agent Runtime). "
+        "a2a: registers the agent card; the agent must be an A2A agent.",
+    )
+    sharing: Literal["allUsers"] | None = Field(
+        default=None, description="allUsers shares the agent with everyone in the app; omit to keep the API default."
+    )
+    agent_gateway: str | None = Field(
+        default=None,
+        pattern=r"^projects/[^/]+/locations/[^/]+/agentGateways/[^/]+$",
+        description="Egress Agent Gateway of the app. Set when the app has none; never changed or reverted, "
+        "since every agent of the app shares it.",
+    )
+    grant_service_agent: bool = Field(
+        default=True,
+        description="Grant roles/aiplatform.user to the app's Discovery Engine service agent so it can call the "
+        "agent. Grant-only: kept on remove.",
+    )
     authorization: Authorization | None = None
+
+
+class AgentRegistry(_Model):
+    """Registration of the agent's A2A card as a service in the Agent Registry."""
+
+    location: str | None = Field(default=None, description="Registry location; defaults to provider.region.")
+    service_id: str | None = Field(
+        default=None, pattern=r"^[a-z][a-z0-9-]{0,62}$", description="Defaults to <service>-<stage>."
+    )
+    display_name: str | None = Field(default=None, description="Defaults to the card's name.")
+    description: str | None = Field(default=None, description="Defaults to the card's description.")
 
 
 class Publish(_Model):
     """Post-deploy publication targets."""
 
+    agent_registry: AgentRegistry | None = None
     gemini_enterprise: GeminiEnterprise | None = None
+
+
+_MEMBER_PREFIXES = ("user:", "group:", "serviceAccount:", "domain:", "principal://", "principalSet://")
+
+
+class Access(_Model):
+    """Who may call the agent, besides Gemini Enterprise."""
+
+    invokers: list[str] = Field(
+        default_factory=list,
+        description="IAM members granted roles/aiplatform.user on the project. Grant-only: never revoked, "
+        "since other agents may rely on the same binding.",
+    )
+
+    @field_validator("invokers")
+    @classmethod
+    def _members(cls, v: list[str]) -> list[str]:
+        for member in v:
+            if not member.startswith(_MEMBER_PREFIXES):
+                raise ValueError(f"invalid IAM member {member!r} (expected user:, group:, serviceAccount:, …)")
+        return v
 
 
 class AgentConfig(_Model):
@@ -416,6 +469,7 @@ class AgentConfig(_Model):
     stages: dict[str, StageConfig] = Field(default_factory=dict)
     agent: Agent = Field(default_factory=Agent)
     identity: Identity = Field(default_factory=lambda: Identity(type=IdentityType.PLATFORM))
+    access: Access = Field(default_factory=Access)
     network: Network = Field(default_factory=Network)
     memory: Memory = Field(default_factory=Memory)
     publish: Publish = Field(default_factory=Publish)

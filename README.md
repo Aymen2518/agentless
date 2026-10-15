@@ -59,7 +59,8 @@ agent.yaml ──► load ──► resolve ${…} ──► validate ──► 
 | 2 | `agentIdentity` | bare engine that mints the Agent Identity principal (only for `identity.type: agentIdentity`) |
 | 3 | `iam` | role bindings for the runtime identity: project, org, buckets, secrets, datasets, SAs |
 | 4 | `engine` | the reasoning engine: config (with update masks) and code (source tarball, rebuilt only when the hash changes) |
-| 5 | `geminiEnterprise` | registration in a Gemini Enterprise app, plus its OAuth authorization |
+| 5 | `agentRegistry` | the agent's A2A card, registered as a service in the Agent Registry |
+| 6 | `geminiEnterprise` | registration in a Gemini Enterprise app (ADK or A2A), plus its OAuth authorization |
 
 **State** is one JSON object per service and stage. It lives in `gs://<stagingBucket>/agentless/<service>/<stage>/`,
 or in `.agentless/<stage>/` locally when `stagingBucket` is unset. It records:
@@ -76,8 +77,8 @@ Each deploy diffs the desired config against this record and against live GCP re
 
 | Owner | Scope |
 |---|---|
-| **agentless** (`agent.yaml`) | everything per agent: SA, IAM grants, buckets the agent owns (reports, outputs), engine config and code, Memory Bank, PSC-I, GE registration |
-| **Your infrastructure-as-code** (Terraform, etc.) | per environment: APIs, deployer SA, state bucket, telemetry dataset, and shared data resources (datasets, secrets, buckets used by several agents) |
+| **agentless** (`agent.yaml`) | everything per agent: SA, IAM grants, buckets the agent owns (reports, outputs), engine config and code, Memory Bank, PSC-I, Agent Registry and GE registration |
+| **Your infrastructure-as-code** (Terraform, etc.) | per environment: APIs, deployer SA, state bucket, telemetry dataset, the Gemini Enterprise app and Agent Gateway, and shared data resources (datasets, secrets, buckets used by several agents) |
 | **agents-cli** | developing the agent: scaffold, playground, eval. It reads the `deployment_metadata.json` agentless writes, so `run --url` and `publish` still work |
 
 ## Install
@@ -230,7 +231,9 @@ identity:
 | `identity.roles` | project, organization, and per-resource roles (bucket, secret, BigQuery dataset, SA, folder) | IAM policies |
 | `network.pscInterface` | network attachment + DNS peering | `deploymentSpec.pscInterfaceConfig` (immutable) |
 | `memory` | sessions mode, artifacts bucket, Memory Bank models/TTL/topics | `contextSpec.memoryBankConfig` |
-| `publish.geminiEnterprise` | register in a GE app, optional OAuth authorization with scopes | Discovery Engine `agents` / `authorizations` |
+| `access.invokers` | members allowed to call the agent (grant-only) | project IAM (`roles/aiplatform.user`) |
+| `publish.agentRegistry` | register the A2A card in the Agent Registry | Agent Registry `services` |
+| `publish.geminiEnterprise` | register in a GE app (ADK or A2A), sharing, app egress gateway, optional OAuth authorization with scopes | Discovery Engine `agents` / `authorizations` / app `agentGatewaySetting` |
 | `resources.buckets` | GCS buckets agentless creates, with access for the agent and the name in an env var | Cloud Storage buckets, bucket IAM |
 | `observability.tracing` | Cloud Trace export (on by default), prompt/response capture (off by default), runtime roles granted automatically | env vars, same as agents-cli; project IAM |
 
@@ -305,6 +308,41 @@ observability:
 
 agentless also grants some access automatically. Each secret in `agent.secrets` gets `secretAccessor`, and
 `memory.artifactsBucket` gets `storage.objectUser`.
+
+### Publishing
+
+```yaml
+access:
+  invokers: [group:support-users@acme.com]
+publish:
+  agentRegistry: {}                        # A2A agents: card registered as <service>-<stage> in provider.region
+  geminiEnterprise:
+    app: projects/<number>/locations/global/collections/default_collection/engines/<app-id>
+    registration: adk                      # or a2a
+    sharing: allUsers
+    agentGateway: projects/<project>/locations/europe-west1/agentGateways/<gateway>
+```
+
+- **Agent Registry:** only A2A agents (`create_params.is_a2a` in `agents-cli-manifest.yaml`) serve a card, so `plan`
+  blocks otherwise. agentless reads the card from the deployed engine and registers it as an `A2A_AGENT_CARD`
+  service. An Agent Gateway whose `registries` include that location then governs the agent. `plan` reads the live
+  card, so a changed card shows up as an update. After a code deploy the card is refreshed in the same run. A new
+  `serviceId` or `location` registers the new service before deleting the old one.
+- **`registration`:** `adk` (the default) lets Gemini Enterprise call the engine natively; agents-cli recommends it
+  on Agent Runtime. `a2a` registers the agent card instead, attaches the OAuth authorization as
+  `agentAuthorization`, and adopts a registration made by `agents-cli publish` by matching the card's `url`.
+  Switching between the two replaces the registration.
+- **`sharing: allUsers`** shares the agent with everyone in the app. Leaving it out keeps whatever the app has.
+- **`agentGateway`** sets the app's egress Agent Gateway when the app has none. The setting belongs to the app and is
+  shared by all its agents, so agentless never changes a different value (`plan` prints a warning and leaves it) and
+  never reverts it on `remove`.
+- **Grant-only access:** `access.invokers` get `roles/aiplatform.user` on the project. When the agent is published,
+  the Gemini Enterprise app's Discovery Engine service agent gets the same role, so the app can call the engine
+  (opt out with `grantServiceAgent: false`). These bindings are shared with other agents, so agentless grants them
+  when they're missing and never revokes them. `plan` marks them `(grant-only, kept on remove)`. The service agent
+  is derived from the project number in `app`. If `app` uses another project's id, `plan` asks for the number.
+- `info` shows the registry service, the registration mode and the gateway. Its `a2aCardUrl` uses the engine's
+  `/api/a2a/<agentDirectory>` passthrough, the same URL agents-cli uses.
 
 ### Variables
 
@@ -395,7 +433,7 @@ Without a TTY (CI), `deploy` applies without asking, like `serverless deploy`. W
 
 | Principal | Roles |
 |---|---|
-| Deployer (your user, a CI service account via Workload Identity Federation, or the impersonated `provider.deployer`) | `roles/aiplatform.admin`, `roles/iam.serviceAccountAdmin`, `roles/iam.serviceAccountUser`, `roles/resourcemanager.projectIamAdmin`, `roles/storage.objectAdmin` on the state bucket, `roles/secretmanager.admin` (or `setIamPolicy`) on the agent's secrets, `roles/discoveryengine.editor` to publish, `roles/storage.admin` when `resources.buckets` is used, `roles/monitoring.viewer` for `agentless metrics`. Org-level grants also need org IAM admin. Leave `identity.roles.organization` out until that's approved. |
+| Deployer (your user, a CI service account via Workload Identity Federation, or the impersonated `provider.deployer`) | `roles/aiplatform.admin`, `roles/iam.serviceAccountAdmin`, `roles/iam.serviceAccountUser`, `roles/resourcemanager.projectIamAdmin`, `roles/storage.objectAdmin` on the state bucket, `roles/secretmanager.admin` (or `setIamPolicy`) on the agent's secrets, `roles/discoveryengine.editor` to publish (`roles/discoveryengine.admin` on the app for `agentGateway`), `roles/agentregistry.editor` for `publish.agentRegistry`, `roles/storage.admin` when `resources.buckets` is used, `roles/monitoring.viewer` for `agentless metrics`. Org-level grants also need org IAM admin. Leave `identity.roles.organization` out until that's approved. |
 | Caller, when impersonating a deployer | `roles/iam.serviceAccountTokenCreator` on the deployer SA (and on each delegate) |
 | Runtime SA or Agent Identity principal | what `identity.roles` lists, plus automatic grants: secrets, the artifacts bucket, declared buckets, and with tracing on `cloudtrace.agent`, `logging.logWriter`, `monitoring.metricWriter` |
 
@@ -550,7 +588,8 @@ docker run --rm \
 - The engine code path uses the Agent Platform SDK's private `_create_config` / `_create` / `_update` methods, the
   same calls agents-cli makes. The SDK is pinned `<2`.
 - Agent Identity is a preview feature on Agent Runtime.
-- Gemini Enterprise publishing and Memory Bank haven't been exercised against the live APIs yet.
+- Gemini Enterprise publishing, the Agent Registry, the app gateway setting and Memory Bank haven't been exercised
+  against the live APIs yet.
 
 **Next:**
 1. Cloud Run target (paused; see the notes above).

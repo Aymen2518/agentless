@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import itertools
+import json
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
+
+from agentless.providers.agent_runtime.clients import _GE_AGENT_FIELDS, ge_agent_mask
 
 
 class FakeGcp:
@@ -18,6 +21,8 @@ class FakeGcp:
         self.operations: dict[str, dict[str, Any]] = {}
         self.ge_agents: dict[str, dict[str, Any]] = {}
         self.ge_authorizations: dict[str, dict[str, Any]] = {}
+        self.ge_gateways: dict[str, str] = {}  # app -> egress Agent Gateway
+        self.registry: dict[str, dict[str, Any]] = {}
         self.buckets: dict[str, dict[str, Any]] = {}
         self.bucket_objects: dict[str, int] = defaultdict(int)
         self.absent_buckets: set[str] = set()  # IAM targets that do not exist (others are assumed to)
@@ -166,21 +171,49 @@ class FakeGcp:
         self.calls.append(("engine_delete", name))
         self.engines.pop(name, None)
 
+    # A2A card served by an engine (url = the engine's A2A endpoint, as agents-cli's A2A app does)
+    def a2a_card(self, url: str) -> dict[str, Any] | None:
+        engine = url.split("/reasoningEngines/v1/", 1)[1].split("/api/", 1)[0]
+        if engine not in self.engines:
+            return None
+        self.calls.append(("a2a_card", url))
+        base = url.removesuffix("/.well-known/agent-card.json")
+        version = self.engines[engine].get("card_version", 1)
+        return {"name": "sample-agent", "description": f"card v{version}", "url": base, "version": str(version)}
+
     # Gemini Enterprise
-    def ge_find_agent(self, app: str, engine_name: str) -> str | None:
-        return next((n for n, a in self.ge_agents.items() if a["engine"] == engine_name and n.startswith(app)), None)
+    @staticmethod
+    def _ge_target(payload: dict[str, Any]) -> dict[str, Any]:
+        if "adk_agent_definition" in payload:
+            return {"engine": payload["adk_agent_definition"]["provisioned_reasoning_engine"]["reasoning_engine"]}
+        return {"card_url": json.loads(payload["a2a_agent_definition"]["json_agent_card"])["url"]}
+
+    def ge_find_agent(self, app: str, *, engine: str | None = None, card_url: str | None = None) -> str | None:
+        return next(
+            (
+                n
+                for n, a in self.ge_agents.items()
+                if n.startswith(app)
+                and ((engine and a.get("engine") == engine) or (card_url and a.get("card_url") == card_url))
+            ),
+            None,
+        )
 
     def ge_create_agent(self, app: str, payload: dict[str, Any]) -> str:
         name = f"{app}/assistants/default_assistant/agents/{next(self._ids)}"
-        engine = payload["adk_agent_definition"]["provisioned_reasoning_engine"]["reasoning_engine"]
-        self.ge_agents[name] = {"engine": engine, "payload": payload}
+        self.ge_agents[name] = {**self._ge_target(payload), "payload": payload}
         self.calls.append(("ge_create", name))
         return name
 
     def ge_patch_agent(self, name: str, payload: dict[str, Any]) -> None:
+        if name not in self.ge_agents:
+            raise RuntimeError(f"404 agent {name} not found")
         self.calls.append(("ge_patch", name))
-        engine = payload["adk_agent_definition"]["provisioned_reasoning_engine"]["reasoning_engine"]
-        self.ge_agents[name] = {"engine": engine, "payload": payload}
+        # Like the API: only masked fields change; a masked field missing from the payload is cleared.
+        masked = {key for key, mask in _GE_AGENT_FIELDS if mask in ge_agent_mask(payload)}
+        merged = {k: v for k, v in self.ge_agents[name]["payload"].items() if k not in masked}
+        merged |= {k: v for k, v in payload.items() if k in masked}
+        self.ge_agents[name] = {**self._ge_target(merged), "payload": merged}
 
     def ge_delete_agent(self, name: str) -> None:
         self.calls.append(("ge_delete", name))
@@ -196,6 +229,34 @@ class FakeGcp:
     def ge_delete_authorization(self, name: str) -> None:
         self.calls.append(("ge_auth_delete", name))
         self.ge_authorizations.pop(name, None)
+
+    def ge_app_gateway(self, app: str) -> str | None:
+        return self.ge_gateways.get(app)
+
+    def ge_set_app_gateway(self, app: str, gateway: str) -> None:
+        self.calls.append(("ge_gateway", app, gateway))
+        self.ge_gateways[app] = gateway
+
+    # Agent Registry
+    def registry_get(self, name: str) -> dict[str, Any] | None:
+        return self.registry.get(name)
+
+    def registry_create(self, parent: str, service_id: str, body: dict[str, Any]) -> None:
+        name = f"{parent}/services/{service_id}"
+        if name in self.registry:
+            raise RuntimeError(f"409 service {name} already exists")
+        self.calls.append(("registry_create", name))
+        self.registry[name] = body
+
+    def registry_patch(self, name: str, body: dict[str, Any]) -> None:
+        if name not in self.registry:
+            raise RuntimeError(f"404 service {name} not found")
+        self.calls.append(("registry_patch", name))
+        self.registry[name] = body
+
+    def registry_delete(self, name: str) -> None:
+        self.calls.append(("registry_delete", name))
+        self.registry.pop(name, None)
 
     def kinds(self) -> list[str]:
         return [c[0] for c in self.calls]

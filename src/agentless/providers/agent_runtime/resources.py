@@ -356,6 +356,20 @@ def _why(k: IamKey, automatic: set[IamKey]) -> str:
 
 
 TRACING_ROLES = ("roles/cloudtrace.agent", "roles/logging.logWriter", "roles/monitoring.metricWriter")
+INVOKER_ROLE = "roles/aiplatform.user"
+
+
+def ge_service_agent(ctx: Context) -> str | None:
+    """Discovery Engine service agent of the Gemini Enterprise app's project, which calls the published agent."""
+    ge = ctx.project.config.publish.gemini_enterprise
+    if ge is None or not ge.grant_service_agent:
+        return None
+    project = ge.app.split("/")[1]
+    if not project.isdigit():
+        if project != ctx.project.config.provider.project:
+            return None  # an id we can't turn into a number; plan says so
+        project = ctx.clients.project_number()
+    return f"serviceAccount:service-{project}@gcp-sa-discoveryengine.iam.gserviceaccount.com"
 
 
 class IamResource(Resource):
@@ -401,18 +415,33 @@ class IamResource(Resource):
             out |= {("project", cfg.provider.project, role, member) for role in TRACING_ROLES}
         return out
 
+    @staticmethod
+    def shared(ctx: Context) -> set[IamKey]:
+        """Grant-only bindings: added when missing, never recorded or revoked, since other agents may rely on them.
+
+        Invokers from access.invokers, and the Gemini Enterprise app's service agent when the agent is published.
+        """
+        cfg = ctx.project.config
+        project = cfg.provider.project
+        out: set[IamKey] = {("project", project, INVOKER_ROLE, m) for m in cfg.access.invokers}
+        if member := ge_service_agent(ctx):
+            out.add(("project", project, INVOKER_ROLE, member))
+        return out
+
     def _owned(self, ctx: Context) -> set[IamKey]:
         return {tuple(b) for b in self._state(ctx).get("bindings", [])}  # type: ignore[misc]
 
     def _save_owned(self, ctx: Context, owned: set[IamKey]) -> None:
         self._set_state(ctx, {"bindings": sorted(list(k) for k in owned)} if owned else None)
 
-    def _diff(self, ctx: Context, desired: set[IamKey]) -> tuple[set[IamKey], set[IamKey], set[IamKey], list[str]]:
-        """(to add, to remove, already granted outside agentless, missing target resources)."""
+    def _diff(
+        self, ctx: Context, desired: set[IamKey], shared: set[IamKey]
+    ) -> tuple[set[IamKey], set[IamKey], set[IamKey], list[str], set[IamKey]]:
+        """(to add, to remove, already granted outside agentless, missing target resources, grant-only to add)."""
         owned = self._owned(ctx)
         live: dict[tuple[str, str], dict[str, set[str]]] = {}
         missing: list[str] = []
-        for rtype, name in sorted({(k[0], k[1]) for k in desired | owned}):
+        for rtype, name in sorted({(k[0], k[1]) for k in desired | owned | shared}):
             members = ctx.clients.iam_members(rtype, name)
             if members is None:
                 missing.append(f"{rtype}/{name}")
@@ -422,12 +451,26 @@ class IamResource(Resource):
             return k[3] in live[(k[0], k[1])].get(k[2], set())
 
         to_add = {k for k in desired if not granted(k)}
-        to_remove = {k for k in owned - desired if granted(k)}
+        # An owned binding that became grant-only stops being tracked instead of being revoked.
+        to_remove = {k for k in owned - desired - shared if granted(k)}
         foreign = {k for k in desired - owned if granted(k)}
-        return to_add, to_remove, foreign, missing
+        shared_add = {k for k in shared - desired if not granted(k)}
+        return to_add, to_remove, foreign, missing, shared_add
+
+    def _shared_notes(self, ctx: Context) -> list[str]:
+        ge = ctx.project.config.publish.gemini_enterprise
+        if ge and ge.grant_service_agent and ge_service_agent(ctx) is None:
+            return [
+                (
+                    "! cannot derive the Gemini Enterprise service agent from the app's project id; use the project "
+                    "number in publish.geminiEnterprise.app, or set grantServiceAgent: false and grant it yourself"
+                )
+            ]
+        return []
 
     def plan(self, ctx: Context) -> Change:  # noqa: D102
         member = runtime_member(ctx)
+        shared = self.shared(ctx)
         if member is None:
             pending = self.desired(ctx, "<agent principal>")
             auto = self._auto_only(ctx, "<agent principal>")
@@ -435,31 +478,35 @@ class IamResource(Resource):
                 self.key,
                 Action.CREATE,
                 f"{len(pending)} binding(s), principal known after apply",
-                [f"+ {k[2]} on {_target(k)}{_why(k, auto)}" for k in sorted(pending)],
+                [f"+ {k[2]} on {_target(k)}{_why(k, auto)}" for k in sorted(pending)]
+                + [f"+ {k[2]} on {_target(k)} → {k[3]} (grant-only, kept on remove)" for k in sorted(shared)]
+                + self._shared_notes(ctx),
             )
         desired = self.desired(ctx, member)
         auto = self._auto_only(ctx, member)
-        to_add, to_remove, foreign, missing = self._diff(ctx, desired)
+        to_add, to_remove, foreign, missing, shared_add = self._diff(ctx, desired, shared)
         # Buckets declared under resources.buckets are created by the buckets step, before IAM runs.
         created = {f"bucket/{b.name}" for b in ctx.project.config.resources.buckets.values()}
         missing_desired = sorted({_target(k) for k in desired if _target(k) in missing and _target(k) not in created})
         details = [f"+ {k[2]} on {_target(k)} → {k[3]}{_why(k, auto)}" for k in sorted(to_add)]
         details += [f"- {k[2]} on {_target(k)} → {k[3]}" for k in sorted(to_remove)]
         details += [f"= {k[2]} on {_target(k)} (already granted, not managed)" for k in sorted(foreign)]
+        details += [f"+ {k[2]} on {_target(k)} → {k[3]} (grant-only, kept on remove)" for k in sorted(shared_add)]
+        details += self._shared_notes(ctx)
         blocked = (
             f"target resources do not exist: {', '.join(missing_desired)} "
             "(declare buckets under resources.buckets to have agentless create them)"
             if missing_desired
             else None
         )
-        if not to_add and not to_remove:
+        if not to_add and not to_remove and not shared_add:
             return Change(
                 self.key, Action.NOOP, f"{len(self._owned(ctx))} managed binding(s)", details, blocked=blocked
             )
         return Change(
             self.key,
             Action.UPDATE if self._owned(ctx) else Action.CREATE,
-            f"{len(to_add)} to grant, {len(to_remove)} to revoke",
+            f"{len(to_add) + len(shared_add)} to grant, {len(to_remove)} to revoke",
             details,
             blocked=blocked,
         )
@@ -469,7 +516,8 @@ class IamResource(Resource):
         if member is None:
             raise RuntimeError("agent principal is unknown; the agentIdentity step did not run")
         desired = self.desired(ctx, member)
-        to_add, to_remove, _, missing = self._diff(ctx, desired)
+        shared = self.shared(ctx)
+        to_add, to_remove, _, missing, shared_add = self._diff(ctx, desired, shared)
         # A removed target (e.g. deleted bucket) has nothing left to revoke.
         to_remove = {k for k in to_remove if _target(k) not in missing}
         # Owned but undesired bindings that are already gone need no revoke and stop being tracked.
@@ -481,6 +529,8 @@ class IamResource(Resource):
             owned = (owned | add) - remove
             self._save_owned(ctx, owned)  # per target, so a later failure never loses track of earlier grants
         self._save_owned(ctx, owned)
+        if shared_add:
+            self._modify(ctx, shared_add, set())  # grant-only: never recorded, so remove never revokes them
 
     def _modify(self, ctx: Context, to_add: set[IamKey], to_remove: set[IamKey]) -> None:
         grouped: dict[tuple[str, str], dict[str, list[tuple[str, str]]]] = defaultdict(lambda: {"add": [], "rm": []})
@@ -493,13 +543,14 @@ class IamResource(Resource):
 
     def plan_destroy(self, ctx: Context) -> Change:  # noqa: D102
         owned = self._owned(ctx)
+        kept = [f"= {k[2]} on {_target(k)} → {k[3]} (grant-only, kept)" for k in sorted(self.shared(ctx))]
         if not owned:
-            return Change(self.key, Action.NOOP, "no managed bindings")
+            return Change(self.key, Action.NOOP, "no managed bindings", kept)
         return Change(
             self.key,
             Action.DELETE,
             f"revoke {len(owned)} binding(s)",
-            [f"- {k[2]} on {_target(k)} → {k[3]}" for k in sorted(owned)],
+            [f"- {k[2]} on {_target(k)} → {k[3]}" for k in sorted(owned)] + kept,
         )
 
     def destroy(self, ctx: Context) -> None:  # noqa: D102
@@ -660,6 +711,8 @@ class EngineResource(Resource):
             operation = ctx.clients.engine_update(name, config)
             new_spec = last if ctx.options.code_only and last is not None else self._stored(desired, ctx)
             new_hash = ctx.package.sha256 if code else st.get("sourceHash")
+            if code and not ctx.options.code_only:
+                ctx.reapply.update(_CARD_CONSUMERS)  # the agent card can change with the code
 
         st["pending"] = {
             "operation": operation,
@@ -679,7 +732,7 @@ class EngineResource(Resource):
         if after.get("effectiveIdentity") != before["effectiveIdentity"] and before["effectiveIdentity"]:
             ctx.reapply.add("iam")  # a recreated Agent Identity engine has a new principal
         if after.get("name") != before["name"] and before["name"]:
-            ctx.reapply.add("geminiEnterprise")
+            ctx.reapply.update({"agentRegistry", "geminiEnterprise"})
 
     def _wait(self, ctx: Context, operation: str) -> None:
         ctx.clients.wait(operation, on_tick=lambda s: ctx.echo(f"    … {int(s // 60)}m{int(s % 60):02d}s"))
@@ -744,12 +797,128 @@ class EngineResource(Resource):
         self._set_state(ctx, None)
 
 
+# Resources that publish the engine's agent card; both skip their apply when nothing changed.
+_CARD_CONSUMERS = ("agentRegistry", "geminiEnterprise")
+
+
+def is_a2a(ctx: Context) -> bool:
+    """Whether the agent serves an A2A card (agents-cli-manifest.yaml: create_params.is_a2a)."""
+    return bool(ctx.project.manifest and ctx.project.manifest.is_a2a)
+
+
+def agent_card(ctx: Context) -> dict[str, Any] | None:
+    """Card the deployed engine serves; None before the engine exists or while an operation is pending."""
+    engine = ctx.state.resources.get("engine") or {}
+    if not engine.get("name") or engine.get("pending") or not is_a2a(ctx):
+        return None
+    region = ctx.project.config.provider.region
+    return ctx.clients.a2a_card(engine_spec.a2a_card_url(region, engine["name"], ctx.project.agent_directory))
+
+
+_NOT_A2A = "only A2A agents serve an agent card (agents-cli-manifest.yaml: create_params.is_a2a: true)"
+
+
+class AgentRegistryResource(Resource):
+    """The engine's A2A card registered as a service in the Agent Registry (where Agent Gateways govern it)."""
+
+    key = "agentRegistry"
+
+    def _name(self, ctx: Context) -> str | None:
+        cfg = ctx.project.config
+        reg = cfg.publish.agent_registry
+        if reg is None:
+            return None
+        location = reg.location or cfg.provider.region
+        service_id = reg.service_id or f"{cfg.service}-{cfg.provider.stage}"
+        return f"projects/{cfg.provider.project}/locations/{location}/services/{service_id}"
+
+    def _body(self, ctx: Context, name: str, card: dict[str, Any]) -> dict[str, Any]:
+        reg = ctx.project.config.publish.agent_registry
+        assert reg is not None
+        return {
+            "displayName": reg.display_name or card.get("name") or name.rsplit("/", 1)[-1],
+            "description": reg.description or card.get("description") or "",
+            "agentSpec": {"type": "A2A_AGENT_CARD", "content": card},
+        }
+
+    def plan(self, ctx: Context) -> Change:  # noqa: D102
+        st, name = self._state(ctx), self._name(ctx)
+        if name is None:
+            if st:
+                return Change(self.key, Action.DELETE, st["name"], data={"cleanup": st["name"]})
+            return Change(self.key, Action.NOOP, "not registered")
+        blocked = None if is_a2a(ctx) else _NOT_A2A
+        if not st:
+            return Change(self.key, Action.CREATE, name, blocked=blocked)
+        if st["name"] != name:
+            details = [f"~ service: {st['name']} → {name}"]
+            return Change(self.key, Action.REPLACE, name, details, data={"cleanup": st["name"]}, blocked=blocked)
+        details, data = [], {}
+        if st.get("previous"):  # a run that registered the replacement crashed before deleting the old one
+            details.append(f"- {st['previous']} (left over from a rename)")
+            data["cleanup"] = st["previous"]
+        card = agent_card(ctx)
+        if card is not None and _hash(self._body(ctx, name, card)) != st.get("payloadHash"):
+            details.insert(0, "~ agent card or metadata changed")
+        action = Action.UPDATE if details else Action.NOOP
+        return Change(self.key, action, name, details, data=data, blocked=blocked)
+
+    def apply(self, ctx: Context, change: Change) -> None:  # noqa: D102
+        name = self._name(ctx)
+        if name is None:
+            return  # unregistered in cleanup
+        card = agent_card(ctx)
+        if card is None:
+            ctx.echo("    engine not ready, card not registered; rerun `agentless deploy` once it is")
+            return
+        st, body = self._state(ctx), self._body(ctx, name, card)
+        # Recomputed from state, not plan data: a refresh after a code deploy runs with empty data.
+        moving = st["name"] if st.get("name") and st["name"] != name else None
+        if st.get("name") == name and st.get("payloadHash") == _hash(body):
+            return
+        parent, service_id = name.split("/services/")
+        if ctx.clients.registry_get(name) is None:
+            ctx.clients.registry_create(parent, service_id, body)
+        else:
+            ctx.clients.registry_patch(name, body)  # also adopts a service a failed run created
+        previous = moving or st.get("previous")
+        self._set_state(ctx, {"name": name, "payloadHash": _hash(body), **({"previous": previous} if previous else {})})
+        ctx.echo(f"    {name}")
+
+    def cleanup(self, ctx: Context, change: Change) -> None:  # noqa: D102
+        old = change.data.get("cleanup")
+        if not old:
+            return
+        if self._name(ctx) is None:
+            ctx.clients.registry_delete(old)
+            self._set_state(ctx, None)
+            return
+        st = dict(self._state(ctx))
+        if st.get("previous") != old:
+            return  # the replacement isn't registered yet; keep the old service until it is
+        ctx.clients.registry_delete(old)
+        st.pop("previous")
+        self._set_state(ctx, st)
+
+    def plan_destroy(self, ctx: Context) -> Change:  # noqa: D102
+        st = self._state(ctx)
+        return Change(self.key, Action.DELETE, st["name"]) if st else Change(self.key, Action.NOOP, "not registered")
+
+    def destroy(self, ctx: Context) -> None:  # noqa: D102
+        st = self._state(ctx)
+        for name in filter(None, [st.get("previous"), st.get("name")]):
+            ctx.clients.registry_delete(name)
+        self._set_state(ctx, None)
+
+
 class GeminiEnterpriseResource(Resource):
     """Registration of the engine as an agent in a Gemini Enterprise app, plus its OAuth authorization."""
 
     key = "geminiEnterprise"
 
-    def _payload(self, ctx: Context, engine_name: str, authorization: str | None) -> dict[str, Any]:
+    def _payload(
+        self, ctx: Context, engine_name: str, authorization: str | None, card: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         ge = ctx.project.config.publish.gemini_enterprise
         assert ge is not None
         agent = ctx.project.config.agent
@@ -757,13 +926,20 @@ class GeminiEnterpriseResource(Resource):
             "displayName": ge.display_name or ctx.project.config.display_name,
             "description": ge.description or agent.description or ctx.project.config.display_name,
             "icon": {"uri": _GE_ICON},
-            "adk_agent_definition": {
+        }
+        if ge.registration == "a2a":
+            payload["a2a_agent_definition"] = {"json_agent_card": json.dumps(card or {}, sort_keys=True)}
+            if authorization:
+                payload["authorization_config"] = {"agent_authorization": authorization}
+        else:
+            payload["adk_agent_definition"] = {
                 "tool_settings": {"tool_description": ge.tool_description or agent.description or ""},
                 "provisioned_reasoning_engine": {"reasoning_engine": engine_name},
-            },
-        }
-        if authorization:
-            payload["authorization_config"] = {"tool_authorizations": [authorization]}
+            }
+            if authorization:
+                payload["authorization_config"] = {"tool_authorizations": [authorization]}
+        if ge.sharing:
+            payload["sharing_config"] = {"scope": "ALL_USERS"}
         return payload
 
     def _auth_hash(self, ctx: Context) -> str | None:
@@ -779,22 +955,54 @@ class GeminiEnterpriseResource(Resource):
         parts = ge.app.split("/")
         return f"projects/{parts[1]}/locations/{parts[3]}/authorizations/{ge.authorization.id}"
 
+    def _gateway(self, ctx: Context, details: list[str]) -> bool:
+        """Whether the app's egress Agent Gateway must be set; never changes one that is already there."""
+        ge = ctx.project.config.publish.gemini_enterprise
+        if ge is None or ge.agent_gateway is None:
+            return False
+        current = ctx.clients.ge_app_gateway(ge.app)
+        if current == ge.agent_gateway:
+            return False
+        if current:
+            details.append(
+                f"! the app already routes agent traffic through {current}; agentless leaves it "
+                "(change it where the app is managed)"
+            )
+            return False
+        details.append(f"+ app egress gateway: {ge.agent_gateway} (shared by every agent of the app, kept on remove)")
+        return True
+
     def plan(self, ctx: Context) -> Change:  # noqa: D102
         ge, st = ctx.project.config.publish.gemini_enterprise, self._state(ctx)
         if ge is None:
             if st:
                 return Change(self.key, Action.DELETE, st.get("agentName", st.get("app", "")), data={"cleanup": st})
             return Change(self.key, Action.NOOP, "not published")
+        details: list[str] = []
+        problems = [f"registration: a2a: {_NOT_A2A}"] if ge.registration == "a2a" and not is_a2a(ctx) else []
+        gateway = self._gateway(ctx, details)
+        blocked = "; ".join(problems) or None
         if not st:
-            return Change(self.key, Action.CREATE, ge.app)
-        if st.get("app") != ge.app:
-            return Change(
-                self.key, Action.REPLACE, ge.app, [f"~ app: {st.get('app')} → {ge.app}"], data={"cleanup": st}
-            )
+            return Change(self.key, Action.CREATE, ge.app, details, blocked=blocked)
+        registration = st.get("registration", "adk")
+        if st.get("app") != ge.app or registration != ge.registration:
+            details = [
+                f"~ {field}: {old} → {new}"
+                for field, old, new in (("app", st.get("app"), ge.app), ("registration", registration, ge.registration))
+                if old != new
+            ] + details
+            return Change(self.key, Action.REPLACE, ge.app, details, data={"cleanup": st}, blocked=blocked)
+        data = {}
+        if st.get("previous"):  # a run that registered the replacement crashed before removing the old one
+            details.append(f"- {st['previous'].get('agentName', st['previous'].get('app'))} (left over from a move)")
+            data["cleanup"] = st["previous"]
         engine = (ctx.state.resources.get("engine") or {}).get("name") or ""
-        changed = st.get("payloadHash") != _hash(self._payload(ctx, engine, self._auth_name(ctx)))
-        changed |= st.get("authorizationHash") != self._auth_hash(ctx)
-        return Change(self.key, Action.UPDATE if changed else Action.NOOP, st.get("agentName", ge.app))
+        card = agent_card(ctx) if ge.registration == "a2a" else None
+        changed = gateway or bool(data) or st.get("authorizationHash") != self._auth_hash(ctx)
+        if ge.registration == "adk" or card is not None:
+            changed |= st.get("payloadHash") != _hash(self._payload(ctx, engine, self._auth_name(ctx), card))
+        action = Action.UPDATE if changed else Action.NOOP
+        return Change(self.key, action, st.get("agentName", ge.app), details, data=data, blocked=blocked)
 
     def apply(self, ctx: Context, change: Change) -> None:  # noqa: D102
         ge = ctx.project.config.publish.gemini_enterprise
@@ -803,14 +1011,34 @@ class GeminiEnterpriseResource(Resource):
         engine = (ctx.state.resources.get("engine") or {}).get("name")
         if not engine:
             raise RuntimeError("cannot publish to Gemini Enterprise: engine has no name yet")
-        moving = bool(change.data.get("cleanup"))
+        if ge.agent_gateway and ctx.clients.ge_app_gateway(ge.app) is None:
+            ctx.clients.ge_set_app_gateway(ge.app, ge.agent_gateway)
+            ctx.echo(f"    app egress gateway: {ge.agent_gateway}")
+        card = None
+        if ge.registration == "a2a":
+            card = agent_card(ctx)
+            if card is None:
+                ctx.echo("    engine not ready, agent card unavailable; rerun `agentless deploy` once it is")
+                return
         current = dict(self._state(ctx))
+        # Recomputed from state, not plan data: a refresh after a code deploy or engine rename runs with empty data.
+        moving = bool(current) and (
+            current.get("app") != ge.app or current.get("registration", "adk") != ge.registration
+        )
+        if moving and current.get("previous"):
+            _unpublish(ctx, current["previous"], keep=self._auth_name(ctx))  # an older move that never cleaned up
         st = {} if moving else current
+        previous = {k: v for k, v in current.items() if k != "previous"} if moving else current.get("previous")
         authorization = self._auth_name(ctx)
+        payload = self._payload(ctx, engine, authorization, card)
+        unchanged = st.get("payloadHash") == _hash(payload) and st.get("authorizationHash") == self._auth_hash(ctx)
+        if st.get("agentName") and unchanged:
+            return  # a refresh after a code deploy that didn't change the card
         if ge.authorization and (st.get("authorizationHash") != self._auth_hash(ctx) or moving):
             ctx.clients.ge_upsert_authorization(ge.app, ge.authorization.id, ge.authorization.model_dump())
-        payload = self._payload(ctx, engine, authorization)
-        agent_name = st.get("agentName") or ctx.clients.ge_find_agent(ge.app, engine)
+        agent_name = st.get("agentName") or ctx.clients.ge_find_agent(
+            ge.app, engine=engine if ge.registration == "adk" else None, card_url=(card or {}).get("url")
+        )
         if agent_name:
             ctx.clients.ge_patch_agent(agent_name, payload)
         else:
@@ -822,11 +1050,13 @@ class GeminiEnterpriseResource(Resource):
             ctx,
             {
                 "app": ge.app,
+                "registration": ge.registration,
                 "agentName": agent_name,
                 "payloadHash": _hash(payload),
                 "authorizationName": authorization,
                 "authorizationHash": self._auth_hash(ctx),
-                **({"previous": change.data["cleanup"]} if moving else {}),
+                **({"agentGateway": ge.agent_gateway} if ge.agent_gateway else {}),
+                **({"previous": previous} if previous else {}),
             },
         )
         ctx.echo(f"    {agent_name}")
@@ -835,6 +1065,8 @@ class GeminiEnterpriseResource(Resource):
         old = change.data.get("cleanup")
         if not old:
             return
+        if ctx.project.config.publish.gemini_enterprise and "previous" not in self._state(ctx):
+            return  # the replacement wasn't registered (engine not ready); keep the old one until it is
         _unpublish(ctx, old, keep=self._auth_name(ctx))
         st = self._state(ctx)
         st.pop("previous", None)
@@ -871,5 +1103,6 @@ ALL_RESOURCES: tuple[type[Resource], ...] = (
     BucketsResource,
     IamResource,
     EngineResource,
+    AgentRegistryResource,
     GeminiEnterpriseResource,
 )
