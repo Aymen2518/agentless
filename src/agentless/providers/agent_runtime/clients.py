@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import json
 import time
 import urllib.parse
 from collections.abc import Callable, Iterable
@@ -324,7 +325,7 @@ class GcpClients:
         session.headers["X-Goog-User-Project"] = self.project
         return session
 
-    def _ge(self, method: str, url: str, **kwargs: Any) -> dict[str, Any]:
+    def _rest(self, method: str, url: str, **kwargs: Any) -> dict[str, Any]:
         response = self._http.request(method, url, timeout=60, **kwargs)
         if response.status_code == 404 and method == "DELETE":
             return {}
@@ -332,15 +333,36 @@ class GcpClients:
             raise RuntimeError(f"{method} {url} -> {response.status_code}: {response.text}")
         return response.json() if response.content else {}
 
-    def ge_find_agent(self, app: str, engine_name: str) -> str | None:
-        """Name of the GE agent registered for this reasoning engine, if any."""
+    def _get_or_none(self, url: str) -> dict[str, Any] | None:
+        response = self._http.get(url, timeout=60)
+        if response.status_code == 404:
+            return None
+        if not response.ok:
+            raise RuntimeError(f"GET {url} -> {response.status_code}: {response.text}")
+        return response.json()
+
+    def a2a_card(self, url: str) -> dict[str, Any] | None:
+        """Agent card served by a deployed engine; None when it isn't served (yet), e.g. while new code starts."""
+        import requests
+
+        try:
+            response = self._http.get(url, timeout=60)
+        except requests.ConnectionError:
+            return None
+        if response.status_code == 404 or response.status_code >= 500:
+            return None
+        if not response.ok:
+            raise RuntimeError(f"GET {url} -> {response.status_code}: {response.text}")
+        return response.json()
+
+    def ge_find_agent(self, app: str, *, engine: str | None = None, card_url: str | None = None) -> str | None:
+        """Name of the GE agent registered for this reasoning engine (adk) or agent card url (a2a), if any."""
         url = f"{_ge_base(app)}/v1alpha/{app}/assistants/default_assistant/agents"
         page_token = None
         while True:
-            data = self._ge("GET", url, params={"pageToken": page_token} if page_token else None)
+            data = self._rest("GET", url, params={"pageToken": page_token} if page_token else None)
             for agent in data.get("agents", []):
-                definition = agent.get("adkAgentDefinition", {}).get("provisionedReasoningEngine", {})
-                if definition.get("reasoningEngine") == engine_name:
+                if _ge_matches(agent, engine, card_url):
                     return agent["name"]
             page_token = data.get("nextPageToken")
             if not page_token:
@@ -349,16 +371,20 @@ class GcpClients:
     def ge_create_agent(self, app: str, payload: dict[str, Any]) -> str:
         """Register the agent; returns its resource name."""
         url = f"{_ge_base(app)}/v1alpha/{app}/assistants/default_assistant/agents"
-        return self._ge("POST", url, json=payload)["name"]
+        return self._rest("POST", url, json=payload)["name"]
 
     def ge_patch_agent(self, name: str, payload: dict[str, Any]) -> None:
-        """Update a registration in place."""
-        mask = "display_name,description,icon,adk_agent_definition,authorization_config"
-        self._ge("PATCH", f"{_ge_base(name)}/v1alpha/{name}", params={"updateMask": mask}, json=payload)
+        """Update a registration in place.
+
+        The mask covers the fields in the payload, plus authorization_config so a dropped authorization is cleared.
+        sharing_config is only masked when set, so omitting `sharing` keeps whatever the app has.
+        """
+        mask = ",".join(ge_agent_mask(payload))
+        self._rest("PATCH", f"{_ge_base(name)}/v1alpha/{name}", params={"updateMask": mask}, json=payload)
 
     def ge_delete_agent(self, name: str) -> None:
         """Unregister; missing is fine."""
-        self._ge("DELETE", f"{_ge_base(name)}/v1alpha/{name}")
+        self._rest("DELETE", f"{_ge_base(name)}/v1alpha/{name}")
 
     def ge_upsert_authorization(self, app: str, auth_id: str, oauth: dict[str, Any]) -> str:
         """Create or patch the OAuth authorization GE uses to call the agent as the user."""
@@ -378,24 +404,97 @@ class GcpClients:
             }
         )
         body = {
+            "displayName": oauth.get("display_name") or auth_id,
             "serverSideOauth2": {
                 "clientId": oauth["client_id"],
                 "clientSecret": oauth["client_secret"],
                 "authorizationUri": f"{oauth['authorization_uri']}?{query}",
                 "tokenUri": oauth["token_uri"],
-            }
+                "scopes": oauth["scopes"],
+            },
         }
         base = _ge_base(app)
         response = self._http.get(f"{base}/v1alpha/{name}", timeout=60)
         if response.status_code == 404:
-            self._ge("POST", f"{base}/v1alpha/{parent}/authorizations", params={"authorizationId": auth_id}, json=body)
+            self._rest(
+                "POST", f"{base}/v1alpha/{parent}/authorizations", params={"authorizationId": auth_id}, json=body
+            )
         else:
-            self._ge("PATCH", f"{base}/v1alpha/{name}", params={"updateMask": "serverSideOauth2"}, json=body)
+            mask = "displayName,serverSideOauth2"
+            self._rest("PATCH", f"{base}/v1alpha/{name}", params={"updateMask": mask}, json=body)
         return name
 
     def ge_delete_authorization(self, name: str) -> None:
         """Delete an authorization; missing is fine."""
-        self._ge("DELETE", f"{_ge_base(name)}/v1alpha/{name}")
+        self._rest("DELETE", f"{_ge_base(name)}/v1alpha/{name}")
+
+    def ge_app_gateway(self, app: str) -> str | None:
+        """Egress Agent Gateway the app routes agent traffic through, if any."""
+        data = self._rest("GET", f"{_ge_base(app)}/v1alpha/{app}")
+        return ((data.get("agentGatewaySetting") or {}).get("defaultEgressAgentGateway") or {}).get("name") or None
+
+    def ge_set_app_gateway(self, app: str, gateway: str) -> None:
+        """Route the app's agent traffic through an Agent Gateway."""
+        self._rest(
+            "PATCH",
+            f"{_ge_base(app)}/v1alpha/{app}",
+            params={"updateMask": "agentGatewaySetting.defaultEgressAgentGateway.name"},
+            json={"agentGatewaySetting": {"defaultEgressAgentGateway": {"name": gateway}}},
+        )
+
+    # --- Agent Registry (v1alpha REST) ---------------------------------------------------------------------------
+
+    def registry_get(self, name: str) -> dict[str, Any] | None:
+        """A registry service, or None."""
+        return self._get_or_none(f"{_REGISTRY}/v1alpha/{name}")
+
+    def registry_create(self, parent: str, service_id: str, body: dict[str, Any]) -> None:
+        """Register a service under `projects/{p}/locations/{loc}`."""
+        self._rest("POST", f"{_REGISTRY}/v1alpha/{parent}/services", params={"serviceId": service_id}, json=body)
+
+    def registry_patch(self, name: str, body: dict[str, Any]) -> None:
+        """Update a service's card, display name and description."""
+        mask = "agentSpec,displayName,description"
+        self._rest("PATCH", f"{_REGISTRY}/v1alpha/{name}", params={"updateMask": mask}, json=body)
+
+    def registry_delete(self, name: str) -> None:
+        """Unregister; missing is fine."""
+        self._rest("DELETE", f"{_REGISTRY}/v1alpha/{name}")
+
+
+_REGISTRY = "https://agentregistry.googleapis.com"
+# Patchable registration fields: (payload key, update-mask path), in mask order.
+_GE_AGENT_FIELDS = (
+    ("displayName", "display_name"),
+    ("description", "description"),
+    ("icon", "icon"),
+    ("adk_agent_definition", "adk_agent_definition"),
+    ("a2a_agent_definition", "a2a_agent_definition"),
+    ("authorization_config", "authorization_config"),
+    ("sharing_config", "sharing_config"),
+)
+
+
+def ge_agent_mask(payload: dict[str, Any]) -> list[str]:
+    """Update-mask paths for a registration payload.
+
+    Covers what the payload sets, plus authorization_config so a dropped authorization is cleared. sharing_config is
+    only masked when set, so omitting it keeps the app's value.
+    """
+    return [mask for key, mask in _GE_AGENT_FIELDS if key in payload or key == "authorization_config"]
+
+
+def _ge_matches(agent: dict[str, Any], engine: str | None, card_url: str | None) -> bool:
+    if engine:
+        definition = (agent.get("adkAgentDefinition") or {}).get("provisionedReasoningEngine") or {}
+        if definition.get("reasoningEngine") == engine:
+            return True
+    if card_url:
+        raw = (agent.get("a2aAgentDefinition") or {}).get("jsonAgentCard") or "{}"
+        with contextlib.suppress(ValueError):
+            card = json.loads(raw)
+            return isinstance(card, dict) and card.get("url") == card_url
+    return False
 
 
 def _ge_base(resource: str) -> str:

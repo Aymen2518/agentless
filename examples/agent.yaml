@@ -80,13 +80,24 @@ observability:
     enabled: true                          # grants cloudtrace.agent, logging.logWriter, monitoring.metricWriter
     captureContent: ${param:captureContent, false}   # prompts/responses in spans; e.g. -p captureContent=true
 
+access:
+  invokers: [group:support-users@acme.com]   # roles/aiplatform.user on the project; grant-only, kept on remove
+
 publish:
+  agentRegistry:                           # A2A agents only: registers the card where Agent Gateways govern it
+    location: europe-west1                 # default provider.region
+    serviceId: support-agent-${stage}      # default <service>-<stage>
   geminiEnterprise:
     app: projects/<number>/locations/global/collections/default_collection/engines/<app-id>
     displayName: Support
     toolDescription: Answers internal support questions using the ticket base
+    registration: adk                      # adk (recommended on Agent Runtime) | a2a (registers the agent card)
+    sharing: allUsers                      # omit to keep the app's default
+    agentGateway: projects/<project>/locations/europe-west1/agentGateways/<gateway>   # app egress; set if unset, never reverted
+    grantServiceAgent: true                # app's Discovery Engine service agent gets roles/aiplatform.user
     authorization:                         # OAuth so the agent acts as the end user
       id: support-agent-oauth
+      displayName: Support (OAuth)
       clientId: ${secret:support-oauth-client-id}
       clientSecret: ${secret:support-oauth-client-secret}
       scopes: [https://www.googleapis.com/auth/cloud-platform]

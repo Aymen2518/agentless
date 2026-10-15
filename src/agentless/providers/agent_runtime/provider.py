@@ -14,6 +14,7 @@ from agentless.package.packager import Package, collect
 from agentless.plan.model import Action, Change, ChangeSet, Context, DeployOptions, Resource
 from agentless.providers.agent_runtime.clients import GcpClients
 from agentless.providers.agent_runtime.resources import ALL_RESOURCES, EngineResource, agent_principal
+from agentless.providers.agent_runtime.spec import a2a_card_url
 from agentless.state.store import GcsStateStore, LocalStateStore, State, StateError, StateStore
 
 
@@ -188,8 +189,7 @@ class AgentRuntimeProvider:
                 "sourceHash": (engine.get("sourceHash") or "")[:12],
                 "pendingOperation": (engine.get("pending") or {}).get("operation"),
                 "queryUrl": f"https://{cfg.provider.region}-aiplatform.googleapis.com/v1/{name}:streamQuery",
-                "a2aCardUrl": f"https://{cfg.provider.region}-aiplatform.googleapis.com/reasoningEngines/v1/{name}/a2a/"
-                f"{self.project.agent_directory}/.well-known/agent-card.json",
+                "a2aCardUrl": a2a_card_url(cfg.provider.region, name, self.project.agent_directory),
                 "console": f"https://console.cloud.google.com/vertex-ai/agents/agent-engines/locations/"
                 f"{cfg.provider.region}/agent-engines/{engine_id}?project={cfg.provider.project}",
             }
@@ -199,8 +199,13 @@ class AgentRuntimeProvider:
             out["serviceAccount"] = state.resources["serviceAccount"]["email"]
         if principal := agent_principal(engine.get("effectiveIdentity")):
             out["agentIdentity"] = f"principal://{principal}"
-        if state.resources.get("geminiEnterprise"):
-            out["geminiEnterprise"] = state.resources["geminiEnterprise"].get("agentName")
+        if state.resources.get("agentRegistry"):
+            out["agentRegistry"] = state.resources["agentRegistry"].get("name")
+        if ge := state.resources.get("geminiEnterprise"):
+            out["geminiEnterprise"] = ge.get("agentName")
+            out["geminiEnterpriseRegistration"] = ge.get("registration", "adk")
+            if ge.get("agentGateway"):
+                out["agentGateway"] = ge["agentGateway"]
         out["iamBindings"] = len((state.resources.get("iam") or {}).get("bindings", []))
         return out
 

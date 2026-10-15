@@ -1,5 +1,21 @@
 {
   "$defs": {
+    "Access": {
+      "additionalProperties": false,
+      "description": "Who may call the agent, besides Gemini Enterprise.",
+      "properties": {
+        "invokers": {
+          "description": "IAM members granted roles/aiplatform.user on the project. Grant-only: never revoked, since other agents may rely on the same binding.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Invokers",
+          "type": "array"
+        }
+      },
+      "title": "Access",
+      "type": "object"
+    },
     "Agent": {
       "additionalProperties": false,
       "description": "The deployed agent itself.",
@@ -75,6 +91,67 @@
       "title": "Agent",
       "type": "object"
     },
+    "AgentRegistry": {
+      "additionalProperties": false,
+      "description": "Registration of the agent's A2A card as a service in the Agent Registry.",
+      "properties": {
+        "location": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Registry location; defaults to provider.region.",
+          "title": "Location"
+        },
+        "serviceId": {
+          "anyOf": [
+            {
+              "pattern": "^[a-z][a-z0-9-]{0,62}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Defaults to <service>-<stage>.",
+          "title": "Serviceid"
+        },
+        "displayName": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Defaults to the card's name.",
+          "title": "Displayname"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Defaults to the card's description.",
+          "title": "Description"
+        }
+      },
+      "title": "AgentRegistry",
+      "type": "object"
+    },
     "Authorization": {
       "additionalProperties": false,
       "description": "OAuth authorization used by Gemini Enterprise to call the agent on the user's behalf.",
@@ -82,6 +159,19 @@
         "id": {
           "title": "Id",
           "type": "string"
+        },
+        "displayName": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Shown on the consent prompt; defaults to the id.",
+          "title": "Displayname"
         },
         "clientId": {
           "title": "Clientid",
@@ -370,6 +460,50 @@
           ],
           "default": null,
           "title": "Tooldescription"
+        },
+        "registration": {
+          "default": "adk",
+          "description": "adk: Gemini Enterprise calls the engine natively (recommended on Agent Runtime). a2a: registers the agent card; the agent must be an A2A agent.",
+          "enum": [
+            "adk",
+            "a2a"
+          ],
+          "title": "Registration",
+          "type": "string"
+        },
+        "sharing": {
+          "anyOf": [
+            {
+              "const": "allUsers",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "allUsers shares the agent with everyone in the app; omit to keep the API default.",
+          "title": "Sharing"
+        },
+        "agentGateway": {
+          "anyOf": [
+            {
+              "pattern": "^projects/[^/]+/locations/[^/]+/agentGateways/[^/]+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Egress Agent Gateway of the app. Set when the app has none; never changed or reverted, since every agent of the app shares it.",
+          "title": "Agentgateway"
+        },
+        "grantServiceAgent": {
+          "default": true,
+          "description": "Grant roles/aiplatform.user to the app's Discovery Engine service agent so it can call the agent. Grant-only: kept on remove.",
+          "title": "Grantserviceagent",
+          "type": "boolean"
         },
         "authorization": {
           "anyOf": [
@@ -664,6 +798,17 @@
       "additionalProperties": false,
       "description": "Post-deploy publication targets.",
       "properties": {
+        "agentRegistry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgentRegistry"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "geminiEnterprise": {
           "anyOf": [
             {
@@ -1000,6 +1145,9 @@
     },
     "identity": {
       "$ref": "#/$defs/Identity"
+    },
+    "access": {
+      "$ref": "#/$defs/Access"
     },
     "network": {
       "$ref": "#/$defs/Network"
