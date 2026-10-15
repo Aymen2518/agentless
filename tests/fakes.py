@@ -54,12 +54,16 @@ class FakeGcp:
     def iam_members(self, rtype: str, name: str) -> dict[str, set[str]] | None:
         if rtype == "bucket" and name in self.absent_buckets:
             return None
+        if rtype == "reasoningEngine" and (name not in self.engines or self._creating(name)):
+            return None  # an engine still being created has no policy yet
         return {r: set(m) for r, m in self.policies[(rtype, name)].items()}
 
     def iam_modify(self, rtype: str, name: str, add: Any, remove: Any) -> None:
         add, remove = list(add), list(remove)
         if rtype == "bucket" and name in self.absent_buckets:
             raise RuntimeError(f"404 bucket {name} not found")
+        if rtype == "reasoningEngine" and (name not in self.engines or self._creating(name)):
+            raise RuntimeError(f"404 reasoning engine {name} not found")
         for _, member in add:
             if member.startswith(("principal://", "principalSet://")) and ".system.id.goog/" not in member:
                 raise RuntimeError(f"400 The member {member} is of an unknown type")
@@ -98,6 +102,10 @@ class FakeGcp:
         self.absent_buckets.add(name)
 
     # engines
+    def _creating(self, engine: str) -> bool:
+        op = self.engines[engine].get("create_op")
+        return bool(op) and not self.operations[op]["done"]
+
     def _op(self, engine: str) -> str:
         name = f"{engine}/operations/{next(self._ids)}"
         self.operations[name] = {"done": self.ops_done_immediately, "error": None}
@@ -141,7 +149,8 @@ class FakeGcp:
             # Like the live API: a service-account engine reports the SA email as its effective identity.
             self.engines[name]["effective_identity"] = config["spec"]["service_account"]
         self.calls.append(("engine_create", name, config))
-        return self._op(name)
+        self.engines[name]["create_op"] = self._op(name)
+        return self.engines[name]["create_op"]
 
     def engine_create_identity(
         self, display_name: str, labels: dict[str, str], encryption_spec: Any = None
@@ -170,6 +179,7 @@ class FakeGcp:
     def engine_delete(self, name: str) -> None:
         self.calls.append(("engine_delete", name))
         self.engines.pop(name, None)
+        self.policies.pop(("reasoningEngine", name), None)  # the engine's IAM policy goes with it
 
     # A2A card served by an engine (url = the engine's A2A endpoint, as agents-cli's A2A app does)
     def a2a_card(self, url: str) -> dict[str, Any] | None:

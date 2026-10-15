@@ -59,8 +59,9 @@ agent.yaml ──► load ──► resolve ${…} ──► validate ──► 
 | 2 | `agentIdentity` | bare engine that mints the Agent Identity principal (only for `identity.type: agentIdentity`) |
 | 3 | `iam` | role bindings for the runtime identity: project, org, buckets, secrets, datasets, SAs |
 | 4 | `engine` | the reasoning engine: config (with update masks) and code (source tarball, rebuilt only when the hash changes) |
-| 5 | `agentRegistry` | the agent's A2A card, registered as a service in the Agent Registry |
-| 6 | `geminiEnterprise` | registration in a Gemini Enterprise app (ADK or A2A), plus its OAuth authorization |
+| 5 | `access` | who may call the agent: bindings on the engine itself (`access.invokers`, the GE service agent) |
+| 6 | `agentRegistry` | the agent's A2A card, registered as a service in the Agent Registry |
+| 7 | `geminiEnterprise` | registration in a Gemini Enterprise app (ADK or A2A), plus its OAuth authorization |
 
 **State** is one JSON object per service and stage. It lives in `gs://<stagingBucket>/agentless/<service>/<stage>/`,
 or in `.agentless/<stage>/` locally when `stagingBucket` is unset. It records:
@@ -231,7 +232,7 @@ identity:
 | `identity.roles` | project, organization, and per-resource roles (bucket, secret, BigQuery dataset, SA, folder) | IAM policies |
 | `network.pscInterface` | network attachment + DNS peering | `deploymentSpec.pscInterfaceConfig` (immutable) |
 | `memory` | sessions mode, artifacts bucket, Memory Bank models/TTL/topics | `contextSpec.memoryBankConfig` |
-| `access.invokers` | members allowed to call the agent (grant-only) | project IAM (`roles/aiplatform.user`) |
+| `access` | members allowed to call the agent, and the role they get | reasoning engine IAM policy |
 | `publish.agentRegistry` | register the A2A card in the Agent Registry | Agent Registry `services` |
 | `publish.geminiEnterprise` | register in a GE app (ADK or A2A), sharing, app egress gateway, optional OAuth authorization with scopes | Discovery Engine `agents` / `authorizations` / app `agentGatewaySetting` |
 | `resources.buckets` | GCS buckets agentless creates, with access for the agent and the name in an env var | Cloud Storage buckets, bucket IAM |
@@ -314,6 +315,7 @@ agentless also grants some access automatically. Each secret in `agent.secrets` 
 ```yaml
 access:
   invokers: [group:support-users@acme.com]
+  role: projects/<project>/roles/agentInvoker   # default roles/aiplatform.user
 publish:
   agentRegistry: {}                        # A2A agents: card registered as <service>-<stage> in provider.region
   geminiEnterprise:
@@ -332,15 +334,23 @@ publish:
   on Agent Runtime. `a2a` registers the agent card instead, attaches the OAuth authorization as
   `agentAuthorization`, and adopts a registration made by `agents-cli publish` by matching the card's `url`.
   Switching between the two replaces the registration.
-- **`sharing: allUsers`** shares the agent with everyone in the app. Leaving it out keeps whatever the app has.
+- **`sharing`:** `allUsers` shares the agent with everyone in the app, `private` keeps it to its creator and
+  admins, and `restricted` limits it to the users and groups given access in the console (the agent's **User
+  permissions** tab). There is no public API for per-agent user or group access, so agentless can't manage that
+  list. Leaving `sharing` out keeps whatever the app has, so console sharing isn't overwritten.
 - **`agentGateway`** sets the app's egress Agent Gateway when the app has none. The setting belongs to the app and is
   shared by all its agents, so agentless never changes a different value (`plan` prints a warning and leaves it) and
   never reverts it on `remove`.
-- **Grant-only access:** `access.invokers` get `roles/aiplatform.user` on the project. When the agent is published,
-  the Gemini Enterprise app's Discovery Engine service agent gets the same role, so the app can call the engine
-  (opt out with `grantServiceAgent: false`). These bindings are shared with other agents, so agentless grants them
-  when they're missing and never revokes them. `plan` marks them `(grant-only, kept on remove)`. The service agent
-  is derived from the project number in `app`. If `app` uses another project's id, `plan` asks for the number.
+- **Access is granted on the engine, not the project.** `access.invokers` get `access.role` on the reasoning
+  engine's own IAM policy, so they can call this agent and no other. When the agent is published, the Gemini
+  Enterprise app's Discovery Engine service agent gets the same role, so the app can call the engine (opt out with
+  `grantServiceAgent: false`). The service agent is derived from the project number in `app`. If `app` uses
+  another project's id, `plan` asks for the number.
+  - These bindings are owned like the runtime IAM: removing an invoker revokes it, and bindings added outside
+    agentless are never touched. They're granted once the engine exists, and again on a recreated engine.
+  - `access.role` defaults to `roles/aiplatform.user`. For least privilege, Google recommends a custom role holding
+    only `aiplatform.reasoningEngines.query`; create it in your infrastructure-as-code and set
+    `role: projects/<project>/roles/<id>`.
 - `info` shows the registry service, the registration mode and the gateway. Its `a2aCardUrl` uses the engine's
   `/api/a2a/<agentDirectory>` passthrough, the same URL agents-cli uses.
 
