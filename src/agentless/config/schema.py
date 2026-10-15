@@ -404,8 +404,10 @@ class GeminiEnterprise(_Model):
         description="adk: Gemini Enterprise calls the engine natively (recommended on Agent Runtime). "
         "a2a: registers the agent card; the agent must be an A2A agent.",
     )
-    sharing: Literal["allUsers"] | None = Field(
-        default=None, description="allUsers shares the agent with everyone in the app; omit to keep the API default."
+    sharing: Literal["allUsers", "restricted", "private"] | None = Field(
+        default=None,
+        description="allUsers: everyone in the app. restricted: the users and groups given access in the console "
+        "(User permissions). private: only the creator and admins. Omit to leave the app's setting alone.",
     )
     agent_gateway: str | None = Field(
         default=None,
@@ -415,8 +417,8 @@ class GeminiEnterprise(_Model):
     )
     grant_service_agent: bool = Field(
         default=True,
-        description="Grant roles/aiplatform.user to the app's Discovery Engine service agent so it can call the "
-        "agent. Grant-only: kept on remove.",
+        description="Grant access.role on the engine to the app's Discovery Engine service agent, so the app can "
+        "call the agent.",
     )
     authorization: Authorization | None = None
 
@@ -443,13 +445,23 @@ _MEMBER_PREFIXES = ("user:", "group:", "serviceAccount:", "domain:", "principal:
 
 
 class Access(_Model):
-    """Who may call the agent, besides Gemini Enterprise."""
+    """Who may call the agent: IAM bindings on the reasoning engine itself, not the project."""
 
     invokers: list[str] = Field(
-        default_factory=list,
-        description="IAM members granted roles/aiplatform.user on the project. Grant-only: never revoked, "
-        "since other agents may rely on the same binding.",
+        default_factory=list, description="IAM members granted `role` on the engine (user:, group:, …)."
     )
+    role: str = Field(
+        default="roles/aiplatform.user",
+        description="Role granted on the engine. For least privilege, use a custom role that holds only "
+        "aiplatform.reasoningEngines.query, e.g. projects/<project>/roles/agentInvoker.",
+    )
+
+    @field_validator("role")
+    @classmethod
+    def _role(cls, v: str) -> str:
+        if not v.startswith(("roles/", "projects/", "organizations/")):
+            raise ValueError(f"invalid role {v!r}")
+        return v
 
     @field_validator("invokers")
     @classmethod

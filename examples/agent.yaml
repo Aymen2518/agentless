@@ -80,8 +80,9 @@ observability:
     enabled: true                          # grants cloudtrace.agent, logging.logWriter, monitoring.metricWriter
     captureContent: ${param:captureContent, false}   # prompts/responses in spans; e.g. -p captureContent=true
 
-access:
-  invokers: [group:support-users@acme.com]   # roles/aiplatform.user on the project; grant-only, kept on remove
+access:                                    # IAM on the engine itself, not the project
+  invokers: [group:support-users@acme.com]
+  role: roles/aiplatform.user              # or a custom role with only aiplatform.reasoningEngines.query
 
 publish:
   agentRegistry:                           # A2A agents only: registers the card where Agent Gateways govern it
@@ -92,7 +93,7 @@ publish:
     displayName: Support
     toolDescription: Answers internal support questions using the ticket base
     registration: adk                      # adk (recommended on Agent Runtime) | a2a (registers the agent card)
-    sharing: allUsers                      # omit to keep the app's default
+    sharing: allUsers                      # allUsers | restricted (console User permissions) | private; omit to keep the app's
     agentGateway: projects/<project>/locations/europe-west1/agentGateways/<gateway>   # app egress; set if unset, never reverted
     grantServiceAgent: true                # app's Discovery Engine service agent gets roles/aiplatform.user
     authorization:                         # OAuth so the agent acts as the end user

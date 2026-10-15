@@ -99,10 +99,59 @@ class GcpClients:
         """Unconditional role → members of a resource's IAM policy; None when the resource does not exist."""
         from google.api_core import exceptions
 
+        if rtype == "reasoningEngine":
+            policy = self._engine_policy(name)
+            if policy is None:
+                return None
+            return {b["role"]: set(b.get("members", [])) for b in policy.get("bindings", []) if not b.get("condition")}
         try:
             return self._iam_members(rtype, name)
         except exceptions.NotFound:
             return None
+
+    def _engine_policy(self, engine: str) -> dict[str, Any] | None:
+        """IAM policy of a reasoning engine (REST: the SDK has no IAM call for engines); None when it's gone.
+
+        The policy version is a query parameter and the body is empty (v1 discovery document).
+        """
+        url = f"https://{engine.split('/')[3]}-aiplatform.googleapis.com/v1/{engine}:getIamPolicy"
+        response = self._http.post(url, params={"options.requestedPolicyVersion": 3}, timeout=60)
+        if response.status_code == 404:
+            return None
+        if response.status_code == 403 and self.engine_get(engine) is None:
+            return None  # IAM endpoints often answer 403 for a resource that no longer exists
+        if not response.ok:
+            raise RuntimeError(f"POST {url} -> {response.status_code}: {response.text}")
+        return response.json()
+
+    def _engine_modify(self, engine: str, add: list[Binding], remove: list[Binding]) -> None:
+        """Read-modify-write an engine's policy; the etag makes a concurrent change fail with 409, then retry."""
+        url = f"https://{engine.split('/')[3]}-aiplatform.googleapis.com/v1/{engine}:setIamPolicy"
+        for attempt in range(_IAM_RETRIES):
+            policy = self._engine_policy(engine)
+            if policy is None:
+                raise RuntimeError(f"404 reasoning engine {engine} not found")
+            bindings: list[dict[str, Any]] = policy.setdefault("bindings", [])
+            for role, member in add:
+                binding = next((b for b in bindings if b["role"] == role and not b.get("condition")), None)
+                if binding is None:
+                    binding: dict[str, Any] = {"role": role, "members": []}
+                    bindings.append(binding)
+                members: list[str] = binding.setdefault("members", [])
+                if member not in members:
+                    members.append(member)
+            for role, member in remove:
+                for b in bindings:
+                    if b["role"] == role and not b.get("condition") and member in b.get("members", []):
+                        b["members"].remove(member)
+            policy["bindings"] = [b for b in bindings if b.get("members")]
+            policy["version"] = 3
+            response = self._http.post(url, json={"policy": policy}, timeout=60)
+            if response.ok:
+                return
+            if response.status_code not in (409, 412) or attempt == _IAM_RETRIES - 1:
+                raise RuntimeError(f"POST {url} -> {response.status_code}: {response.text}")
+            time.sleep(2**attempt)
 
     def _iam_members(self, rtype: str, name: str) -> dict[str, set[str]]:
         if rtype == "bigqueryDataset":
@@ -121,6 +170,9 @@ class GcpClients:
             return
         if rtype == "bigqueryDataset":
             _bq_modify(name, add, remove, self.project, self._credentials)
+            return
+        if rtype == "reasoningEngine":
+            self._engine_modify(name, add, remove)
             return
         if rtype == "bucket":
             _retry(lambda: _bucket_modify(name, add, remove, self.project, self._credentials))

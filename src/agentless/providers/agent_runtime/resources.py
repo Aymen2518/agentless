@@ -356,7 +356,6 @@ def _why(k: IamKey, automatic: set[IamKey]) -> str:
 
 
 TRACING_ROLES = ("roles/cloudtrace.agent", "roles/logging.logWriter", "roles/monitoring.metricWriter")
-INVOKER_ROLE = "roles/aiplatform.user"
 
 
 def ge_service_agent(ctx: Context) -> str | None:
@@ -415,33 +414,18 @@ class IamResource(Resource):
             out |= {("project", cfg.provider.project, role, member) for role in TRACING_ROLES}
         return out
 
-    @staticmethod
-    def shared(ctx: Context) -> set[IamKey]:
-        """Grant-only bindings: added when missing, never recorded or revoked, since other agents may rely on them.
-
-        Invokers from access.invokers, and the Gemini Enterprise app's service agent when the agent is published.
-        """
-        cfg = ctx.project.config
-        project = cfg.provider.project
-        out: set[IamKey] = {("project", project, INVOKER_ROLE, m) for m in cfg.access.invokers}
-        if member := ge_service_agent(ctx):
-            out.add(("project", project, INVOKER_ROLE, member))
-        return out
-
     def _owned(self, ctx: Context) -> set[IamKey]:
         return {tuple(b) for b in self._state(ctx).get("bindings", [])}  # type: ignore[misc]
 
     def _save_owned(self, ctx: Context, owned: set[IamKey]) -> None:
         self._set_state(ctx, {"bindings": sorted(list(k) for k in owned)} if owned else None)
 
-    def _diff(
-        self, ctx: Context, desired: set[IamKey], shared: set[IamKey]
-    ) -> tuple[set[IamKey], set[IamKey], set[IamKey], list[str], set[IamKey]]:
-        """(to add, to remove, already granted outside agentless, missing target resources, grant-only to add)."""
+    def _diff(self, ctx: Context, desired: set[IamKey]) -> tuple[set[IamKey], set[IamKey], set[IamKey], list[str]]:
+        """(to add, to remove, already granted outside agentless, missing target resources)."""
         owned = self._owned(ctx)
         live: dict[tuple[str, str], dict[str, set[str]]] = {}
         missing: list[str] = []
-        for rtype, name in sorted({(k[0], k[1]) for k in desired | owned | shared}):
+        for rtype, name in sorted({(k[0], k[1]) for k in desired | owned}):
             members = ctx.clients.iam_members(rtype, name)
             if members is None:
                 missing.append(f"{rtype}/{name}")
@@ -451,26 +435,12 @@ class IamResource(Resource):
             return k[3] in live[(k[0], k[1])].get(k[2], set())
 
         to_add = {k for k in desired if not granted(k)}
-        # An owned binding that became grant-only stops being tracked instead of being revoked.
-        to_remove = {k for k in owned - desired - shared if granted(k)}
+        to_remove = {k for k in owned - desired if granted(k)}
         foreign = {k for k in desired - owned if granted(k)}
-        shared_add = {k for k in shared - desired if not granted(k)}
-        return to_add, to_remove, foreign, missing, shared_add
-
-    def _shared_notes(self, ctx: Context) -> list[str]:
-        ge = ctx.project.config.publish.gemini_enterprise
-        if ge and ge.grant_service_agent and ge_service_agent(ctx) is None:
-            return [
-                (
-                    "! cannot derive the Gemini Enterprise service agent from the app's project id; use the project "
-                    "number in publish.geminiEnterprise.app, or set grantServiceAgent: false and grant it yourself"
-                )
-            ]
-        return []
+        return to_add, to_remove, foreign, missing
 
     def plan(self, ctx: Context) -> Change:  # noqa: D102
         member = runtime_member(ctx)
-        shared = self.shared(ctx)
         if member is None:
             pending = self.desired(ctx, "<agent principal>")
             auto = self._auto_only(ctx, "<agent principal>")
@@ -478,35 +448,31 @@ class IamResource(Resource):
                 self.key,
                 Action.CREATE,
                 f"{len(pending)} binding(s), principal known after apply",
-                [f"+ {k[2]} on {_target(k)}{_why(k, auto)}" for k in sorted(pending)]
-                + [f"+ {k[2]} on {_target(k)} → {k[3]} (grant-only, kept on remove)" for k in sorted(shared)]
-                + self._shared_notes(ctx),
+                [f"+ {k[2]} on {_target(k)}{_why(k, auto)}" for k in sorted(pending)],
             )
         desired = self.desired(ctx, member)
         auto = self._auto_only(ctx, member)
-        to_add, to_remove, foreign, missing, shared_add = self._diff(ctx, desired, shared)
+        to_add, to_remove, foreign, missing = self._diff(ctx, desired)
         # Buckets declared under resources.buckets are created by the buckets step, before IAM runs.
         created = {f"bucket/{b.name}" for b in ctx.project.config.resources.buckets.values()}
         missing_desired = sorted({_target(k) for k in desired if _target(k) in missing and _target(k) not in created})
         details = [f"+ {k[2]} on {_target(k)} → {k[3]}{_why(k, auto)}" for k in sorted(to_add)]
         details += [f"- {k[2]} on {_target(k)} → {k[3]}" for k in sorted(to_remove)]
         details += [f"= {k[2]} on {_target(k)} (already granted, not managed)" for k in sorted(foreign)]
-        details += [f"+ {k[2]} on {_target(k)} → {k[3]} (grant-only, kept on remove)" for k in sorted(shared_add)]
-        details += self._shared_notes(ctx)
         blocked = (
             f"target resources do not exist: {', '.join(missing_desired)} "
             "(declare buckets under resources.buckets to have agentless create them)"
             if missing_desired
             else None
         )
-        if not to_add and not to_remove and not shared_add:
+        if not to_add and not to_remove:
             return Change(
                 self.key, Action.NOOP, f"{len(self._owned(ctx))} managed binding(s)", details, blocked=blocked
             )
         return Change(
             self.key,
             Action.UPDATE if self._owned(ctx) else Action.CREATE,
-            f"{len(to_add) + len(shared_add)} to grant, {len(to_remove)} to revoke",
+            f"{len(to_add)} to grant, {len(to_remove)} to revoke",
             details,
             blocked=blocked,
         )
@@ -516,8 +482,7 @@ class IamResource(Resource):
         if member is None:
             raise RuntimeError("agent principal is unknown; the agentIdentity step did not run")
         desired = self.desired(ctx, member)
-        shared = self.shared(ctx)
-        to_add, to_remove, _, missing, shared_add = self._diff(ctx, desired, shared)
+        to_add, to_remove, _, missing = self._diff(ctx, desired)
         # A removed target (e.g. deleted bucket) has nothing left to revoke.
         to_remove = {k for k in to_remove if _target(k) not in missing}
         # Owned but undesired bindings that are already gone need no revoke and stop being tracked.
@@ -529,8 +494,6 @@ class IamResource(Resource):
             owned = (owned | add) - remove
             self._save_owned(ctx, owned)  # per target, so a later failure never loses track of earlier grants
         self._save_owned(ctx, owned)
-        if shared_add:
-            self._modify(ctx, shared_add, set())  # grant-only: never recorded, so remove never revokes them
 
     def _modify(self, ctx: Context, to_add: set[IamKey], to_remove: set[IamKey]) -> None:
         grouped: dict[tuple[str, str], dict[str, list[tuple[str, str]]]] = defaultdict(lambda: {"add": [], "rm": []})
@@ -543,14 +506,13 @@ class IamResource(Resource):
 
     def plan_destroy(self, ctx: Context) -> Change:  # noqa: D102
         owned = self._owned(ctx)
-        kept = [f"= {k[2]} on {_target(k)} → {k[3]} (grant-only, kept)" for k in sorted(self.shared(ctx))]
         if not owned:
-            return Change(self.key, Action.NOOP, "no managed bindings", kept)
+            return Change(self.key, Action.NOOP, "no managed bindings")
         return Change(
             self.key,
             Action.DELETE,
             f"revoke {len(owned)} binding(s)",
-            [f"- {k[2]} on {_target(k)} → {k[3]}" for k in sorted(owned)] + kept,
+            [f"- {k[2]} on {_target(k)} → {k[3]}" for k in sorted(owned)],
         )
 
     def destroy(self, ctx: Context) -> None:  # noqa: D102
@@ -732,7 +694,7 @@ class EngineResource(Resource):
         if after.get("effectiveIdentity") != before["effectiveIdentity"] and before["effectiveIdentity"]:
             ctx.reapply.add("iam")  # a recreated Agent Identity engine has a new principal
         if after.get("name") != before["name"] and before["name"]:
-            ctx.reapply.update({"agentRegistry", "geminiEnterprise"})
+            ctx.reapply.update({"access", "agentRegistry", "geminiEnterprise"})
 
     def _wait(self, ctx: Context, operation: str) -> None:
         ctx.clients.wait(operation, on_tick=lambda s: ctx.echo(f"    … {int(s // 60)}m{int(s % 60):02d}s"))
@@ -795,6 +757,133 @@ class EngineResource(Resource):
         if st.get("name") and st.get("created"):
             ctx.clients.engine_delete(st["name"])
         self._set_state(ctx, None)
+
+
+class AccessResource(Resource):
+    """Who may call the agent: bindings on the reasoning engine itself.
+
+    Covers access.invokers and the Gemini Enterprise app's service agent. Owned like the runtime IAM: only what
+    agentless added is ever revoked.
+    """
+
+    key = "access"
+
+    @staticmethod
+    def _engine(ctx: Context) -> str | None:
+        # A pending update (--no-wait) still has a live engine to grant on; one still being created has no policy
+        # yet, which _diff reports as not ready.
+        return (ctx.state.resources.get("engine") or {}).get("name")
+
+    @staticmethod
+    def members(ctx: Context) -> list[str]:
+        """Members that should hold access.role on the engine."""
+        cfg = ctx.project.config
+        out = list(dict.fromkeys(cfg.access.invokers))
+        if (member := ge_service_agent(ctx)) and member not in out:
+            out.append(member)
+        return out
+
+    def _desired(self, ctx: Context, engine: str) -> set[IamKey]:
+        role = ctx.project.config.access.role
+        return {("reasoningEngine", engine, role, m) for m in self.members(ctx)}
+
+    def _owned(self, ctx: Context) -> set[IamKey]:
+        return {tuple(b) for b in self._state(ctx).get("bindings", [])}  # type: ignore[misc]
+
+    def _save(self, ctx: Context, owned: set[IamKey]) -> None:
+        self._set_state(ctx, {"bindings": sorted(list(k) for k in owned)} if owned else None)
+
+    def _notes(self, ctx: Context) -> list[str]:
+        ge = ctx.project.config.publish.gemini_enterprise
+        if ge and ge.grant_service_agent and ge_service_agent(ctx) is None:
+            return [
+                (
+                    "! cannot derive the Gemini Enterprise service agent from the app's project id; use the project "
+                    "number in publish.geminiEnterprise.app, or set grantServiceAgent: false and grant it yourself"
+                )
+            ]
+        return []
+
+    def _diff(self, ctx: Context, engine: str) -> tuple[set[IamKey], set[IamKey], set[IamKey], set[IamKey]]:
+        """(to add, to revoke, already granted outside agentless, owned bindings whose engine is gone)."""
+        owned, desired = self._owned(ctx), self._desired(ctx, engine)
+        live: dict[str, dict[str, set[str]] | None] = {}
+        for name in sorted({k[1] for k in owned | desired}):
+            live[name] = ctx.clients.iam_members("reasoningEngine", name)
+
+        def granted(k: IamKey) -> bool:
+            return k[3] in (live[k[1]] or {}).get(k[2], set())
+
+        gone = {k for k in owned if live[k[1]] is None}  # a replaced engine took its policy with it
+        to_add = {k for k in desired if not granted(k)}
+        to_remove = {k for k in owned - desired - gone if granted(k)}
+        foreign = {k for k in desired - owned if granted(k)}
+        return to_add, to_remove, foreign, gone
+
+    def plan(self, ctx: Context) -> Change:  # noqa: D102
+        engine, owned, notes = self._engine(ctx), self._owned(ctx), self._notes(ctx)
+        role = ctx.project.config.access.role
+        if engine is None:
+            members = self.members(ctx)
+            if not members:
+                return Change(self.key, Action.NOOP, "no invokers", notes)
+            details = [f"+ {role} on the engine → {m}" for m in members] + notes
+            return Change(self.key, Action.CREATE, f"{len(members)} binding(s) once the engine exists", details)
+        to_add, to_remove, foreign, gone = self._diff(ctx, engine)
+        # Recorded but neither granted nor wanted (a crash between recording and granting): forget them.
+        stale = owned - self._desired(ctx, engine) - gone - to_remove
+        details = [f"+ {k[2]} on the engine → {k[3]}" for k in sorted(to_add)]
+        details += [f"- {k[2]} on the engine → {k[3]}" for k in sorted(to_remove)]
+        details += [f"= {k[2]} on the engine → {k[3]} (already granted, not managed)" for k in sorted(foreign)]
+        details += notes
+        if not to_add and not to_remove and not gone and not stale:
+            return Change(self.key, Action.NOOP, f"{len(owned)} managed binding(s)", details)
+        action = Action.UPDATE if owned else Action.CREATE
+        return Change(self.key, action, f"{len(to_add)} to grant, {len(to_remove)} to revoke", details)
+
+    def apply(self, ctx: Context, change: Change) -> None:  # noqa: D102
+        engine = self._engine(ctx)
+        if engine is None:
+            if self.members(ctx):
+                ctx.echo("    engine not ready, access not granted; rerun `agentless deploy` once it is")
+            return
+        if ctx.clients.iam_members("reasoningEngine", engine) is None:
+            if self.members(ctx):
+                ctx.echo("    engine not ready, access not granted; rerun `agentless deploy` once it is")
+            return
+        to_add, to_remove, _, gone = self._diff(ctx, engine)
+        owned = self._owned(ctx) - gone
+        # Owned but undesired bindings already removed by someone else need no revoke and stop being tracked.
+        owned -= (owned - self._desired(ctx, engine)) - to_remove
+        for name in sorted({k[1] for k in to_add | to_remove}):
+            add = {k for k in to_add if k[1] == name}
+            remove = {k for k in to_remove if k[1] == name}
+            # Record grants before making them: a crash then leaves a tracked binding (re-added or dropped next
+            # run), never an untracked one that later runs would treat as foreign and keep forever.
+            self._save(ctx, owned | add)
+            ctx.clients.iam_modify("reasoningEngine", name, [(k[2], k[3]) for k in add], [(k[2], k[3]) for k in remove])
+            owned = (owned | add) - remove
+        self._save(ctx, owned)
+
+    def plan_destroy(self, ctx: Context) -> Change:  # noqa: D102
+        owned = self._owned(ctx)
+        if not owned:
+            return Change(self.key, Action.NOOP, "no managed bindings")
+        return Change(
+            self.key,
+            Action.DELETE,
+            f"revoke {len(owned)} binding(s)",
+            [f"- {k[2]} on the engine → {k[3]}" for k in sorted(owned)],
+        )
+
+    def destroy(self, ctx: Context) -> None:  # noqa: D102
+        owned = self._owned(ctx)
+        for name in sorted({k[1] for k in owned}):
+            keys = {k for k in owned if k[1] == name}
+            if ctx.clients.iam_members("reasoningEngine", name) is not None:
+                ctx.clients.iam_modify("reasoningEngine", name, [], [(k[2], k[3]) for k in keys])
+            owned -= keys
+            self._save(ctx, owned)
 
 
 # Resources that publish the engine's agent card; both skip their apply when nothing changed.
@@ -939,7 +1028,7 @@ class GeminiEnterpriseResource(Resource):
             if authorization:
                 payload["authorization_config"] = {"tool_authorizations": [authorization]}
         if ge.sharing:
-            payload["sharing_config"] = {"scope": "ALL_USERS"}
+            payload["sharing_config"] = {"scope": _SHARING_SCOPES[ge.sharing]}
         return payload
 
     def _auth_hash(self, ctx: Context) -> str | None:
@@ -1086,6 +1175,9 @@ class GeminiEnterpriseResource(Resource):
         self._set_state(ctx, None)
 
 
+_SHARING_SCOPES = {"allUsers": "ALL_USERS", "restricted": "RESTRICTED", "private": "PRIVATE"}
+
+
 def _unpublish(ctx: Context, entry: dict[str, Any], keep: str | None = None) -> None:
     if entry.get("agentName"):
         ctx.clients.ge_delete_agent(entry["agentName"])
@@ -1103,6 +1195,7 @@ ALL_RESOURCES: tuple[type[Resource], ...] = (
     BucketsResource,
     IamResource,
     EngineResource,
+    AccessResource,
     AgentRegistryResource,
     GeminiEnterpriseResource,
 )

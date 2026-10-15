@@ -2,15 +2,21 @@
   "$defs": {
     "Access": {
       "additionalProperties": false,
-      "description": "Who may call the agent, besides Gemini Enterprise.",
+      "description": "Who may call the agent: IAM bindings on the reasoning engine itself, not the project.",
       "properties": {
         "invokers": {
-          "description": "IAM members granted roles/aiplatform.user on the project. Grant-only: never revoked, since other agents may rely on the same binding.",
+          "description": "IAM members granted `role` on the engine (user:, group:, \u2026).",
           "items": {
             "type": "string"
           },
           "title": "Invokers",
           "type": "array"
+        },
+        "role": {
+          "default": "roles/aiplatform.user",
+          "description": "Role granted on the engine. For least privilege, use a custom role that holds only aiplatform.reasoningEngines.query, e.g. projects/<project>/roles/agentInvoker.",
+          "title": "Role",
+          "type": "string"
         }
       },
       "title": "Access",
@@ -474,7 +480,11 @@
         "sharing": {
           "anyOf": [
             {
-              "const": "allUsers",
+              "enum": [
+                "allUsers",
+                "restricted",
+                "private"
+              ],
               "type": "string"
             },
             {
@@ -482,7 +492,7 @@
             }
           ],
           "default": null,
-          "description": "allUsers shares the agent with everyone in the app; omit to keep the API default.",
+          "description": "allUsers: everyone in the app. restricted: the users and groups given access in the console (User permissions). private: only the creator and admins. Omit to leave the app's setting alone.",
           "title": "Sharing"
         },
         "agentGateway": {
@@ -501,7 +511,7 @@
         },
         "grantServiceAgent": {
           "default": true,
-          "description": "Grant roles/aiplatform.user to the app's Discovery Engine service agent so it can call the agent. Grant-only: kept on remove.",
+          "description": "Grant access.role on the engine to the app's Discovery Engine service agent, so the app can call the agent.",
           "title": "Grantserviceagent",
           "type": "boolean"
         },

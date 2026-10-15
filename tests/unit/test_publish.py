@@ -281,58 +281,162 @@ def test_gateway_added_later_is_an_update(make_provider, gcp, edit):
     assert gcp.ge_gateways[GE_APP] == GATEWAY
 
 
-# --- grant-only IAM: invokers and the Gemini Enterprise service agent ---------------------------------------------
+# --- engine-level access: invokers and the Gemini Enterprise service agent ----------------------------------------
 
 
-def test_invokers_and_service_agent_are_granted_and_never_revoked(make_provider, gcp, edit):
+def engine_policy(gcp):
+    return gcp.policies[("reasoningEngine", engine_name(gcp))]
+
+
+def test_invokers_and_service_agent_are_granted_on_the_engine(make_provider, gcp, edit):
     edit(lambda d: (gemini(d), d.update(access={"invokers": ["group:users@example.com"]})))
-    details = plan(make_provider)["iam"].details
-    assert any("group:users@example.com (grant-only" in line for line in details)
+    change = plan(make_provider)["access"]
+    assert change.action == Action.CREATE and "once the engine exists" in change.summary
     deploy(make_provider)
-    project = gcp.policies[("project", "proj-dev")]
-    assert {"group:users@example.com", GE_SA} <= project[INVOKER]
-    owned = {tuple(b)[3] for b in make_provider().store.read().resources["iam"]["bindings"]}
-    assert "group:users@example.com" not in owned and GE_SA not in owned
+    assert engine_policy(gcp)[INVOKER] == {"group:users@example.com", GE_SA}
+    assert INVOKER not in gcp.policies[("project", "proj-dev")] or not (
+        {"group:users@example.com", GE_SA} & gcp.policies[("project", "proj-dev")][INVOKER]
+    ), "nothing is granted project-wide anymore"
+    assert plan(make_provider)["access"].action == Action.NOOP
 
-    edit(lambda d: (d.pop("access"), d.pop("publish")))
+    # Owned: dropping an invoker revokes it, and only it.
+    edit(lambda d: d.pop("access"))
+    assert plan(make_provider)["access"].action == Action.UPDATE
     deploy(make_provider)
+    assert engine_policy(gcp)[INVOKER] == {GE_SA}
     assert make_provider().remove(YES)
-    assert {"group:users@example.com", GE_SA} <= project[INVOKER]
 
 
-def test_present_grant_only_binding_makes_no_iam_call(make_provider, gcp, edit):
+def test_access_role_is_configurable_and_a_change_swaps_bindings(make_provider, gcp, edit):
+    custom = "projects/proj-dev/roles/agentInvoker"
+    edit(lambda d: d.update(access={"invokers": ["user:a@example.com"]}))
     deploy(make_provider)
-    gcp.policies[("project", "proj-dev")][INVOKER].add("group:users@example.com")
-    edit(lambda d: d.update(access={"invokers": ["group:users@example.com"]}))
-    assert plan(make_provider)["iam"].action == Action.NOOP
+    edit(lambda d: d.update(access={"invokers": ["user:a@example.com"], "role": custom}))
+    deploy(make_provider)
+    assert engine_policy(gcp)[custom] == {"user:a@example.com"}
+    assert not engine_policy(gcp).get(INVOKER)
 
 
-def test_owned_binding_that_becomes_grant_only_is_kept(make_provider, gcp, edit):
-    member = "group:users@example.com"
+def test_engine_binding_granted_outside_agentless_is_never_revoked(make_provider, gcp, edit):
     deploy(make_provider)
-    # A runtime member can't be an invoker in practice, so seed an owned binding directly.
-    state = make_provider().store.read()
-    state.resources["iam"]["bindings"].append(["project", "proj-dev", INVOKER, member])
-    make_provider().store.write(state)
-    gcp.policies[("project", "proj-dev")][INVOKER].add(member)
-    edit(lambda d: d.update(access={"invokers": [member]}))
+    engine_policy(gcp)[INVOKER].add("user:a@example.com")
+    edit(lambda d: d.update(access={"invokers": ["user:a@example.com"]}))
+    change = plan(make_provider)["access"]
+    assert change.action == Action.NOOP and any("not managed" in line for line in change.details)
+    edit(lambda d: d.pop("access"))
     deploy(make_provider)
-    assert member in gcp.policies[("project", "proj-dev")][INVOKER]
+    assert engine_policy(gcp)[INVOKER] == {"user:a@example.com"}
+
+
+def test_access_follows_a_recreated_engine(make_provider, gcp, edit):
+    edit(lambda d: d.update(access={"invokers": ["user:a@example.com"]}))
+    deploy(make_provider)
+    old = engine_name(gcp)
+    gcp.engines.clear()  # deleted outside agentless, policy with it
+    gcp.policies.pop(("reasoningEngine", old))
+    deploy(make_provider)
+    assert engine_policy(gcp)[INVOKER] == {"user:a@example.com"}
+    owned = make_provider().store.read().resources["access"]["bindings"]
+    assert [b[1] for b in owned] == [engine_name(gcp)]
+    assert plan(make_provider)["access"].action == Action.NOOP
+
+
+def test_access_waits_for_a_no_wait_engine(make_provider, gcp, edit):
+    gcp.ops_done_immediately = False
+    edit(lambda d: d.update(access={"invokers": ["user:a@example.com"]}))
+    deploy(make_provider, DeployOptions(no_wait=True))
+    assert "access" not in make_provider().store.read().resources
+    finish_operations(make_provider, gcp)
+    deploy(make_provider)
+    assert engine_policy(gcp)[INVOKER] == {"user:a@example.com"}
+
+
+def test_no_wait_update_still_grants_on_the_existing_engine(make_provider, gcp, edit, agent_dir):
+    deploy(make_provider)
+    gcp.ops_done_immediately = False
+    edit(lambda d: d.update(access={"invokers": ["user:a@example.com"]}))
+    (agent_dir / "app" / "agent.py").write_text("root_agent = 'v2'\n")
+    deploy(make_provider, DeployOptions(no_wait=True))
+    assert engine_policy(gcp)[INVOKER] == {"user:a@example.com"}
+
+
+def test_crash_after_recording_a_grant_converges(make_provider, gcp, edit):
+    deploy(make_provider)
+    edit(lambda d: d.update(access={"invokers": ["user:a@example.com"]}))
+    real = gcp.iam_modify
+
+    def boom(rtype, name, add, remove):
+        if rtype == "reasoningEngine":
+            raise RuntimeError("boom")
+        real(rtype, name, add, remove)
+
+    gcp.iam_modify = boom
+    with pytest.raises(RuntimeError, match="boom"):
+        deploy(make_provider)
+    owned = make_provider().store.read().resources["access"]["bindings"]
+    assert [b[3] for b in owned] == ["user:a@example.com"], "recorded before the grant"
+    gcp.iam_modify = real
+    edit(lambda d: d.pop("access"))  # no longer wanted: the never-granted record is just dropped
+    deploy(make_provider)
+    assert "access" not in make_provider().store.read().resources
+
+
+def test_allow_replace_moves_access_to_the_new_engine(make_provider, gcp, edit):
+    edit(lambda d: d.update(access={"invokers": ["user:a@example.com"]}))
+    deploy(make_provider)
+    old = engine_name(gcp)
+    edit(
+        lambda d: d.update(network={"pscInterface": {"networkAttachment": "projects/h/regions/r/networkAttachments/a"}})
+    )
+    deploy(make_provider, DeployOptions(allow_replace=True))
+    assert old not in gcp.engines
+    assert engine_policy(gcp)[INVOKER] == {"user:a@example.com"}
+    owned = make_provider().store.read().resources["access"]["bindings"]
+    assert [b[1] for b in owned] == [engine_name(gcp)]
+
+
+def test_remove_after_engine_deleted_outside_agentless(make_provider, gcp, edit):
+    edit(lambda d: d.update(access={"invokers": ["user:a@example.com"]}))
+    deploy(make_provider)
+    gcp.engines.clear()
+    assert make_provider().remove(YES)
+
+
+def test_remove_revokes_only_owned_access_on_an_adopted_engine(make_provider, gcp, edit):
+    deploy(make_provider)
+    name = engine_name(gcp)
+    make_provider().remove(YES)
+    gcp.engines[name] = {"display_name": "sample-agent-dev"}  # deployed outside agentless, then adopted
+    engine_policy(gcp)[INVOKER].add("user:outside@example.com")
+    edit(lambda d: d.update(access={"invokers": ["user:a@example.com"]}))
+    deploy(make_provider)
+    assert engine_policy(gcp)[INVOKER] == {"user:outside@example.com", "user:a@example.com"}
+    assert make_provider().remove(YES)
+    revokes = [c for c in gcp.calls if c[0] == "iam" and c[1] == "reasoningEngine" and c[4]]
+    assert revokes[-1][4] == [(INVOKER, "user:a@example.com")], "only what agentless granted is revoked"
 
 
 def test_service_agent_opt_out_and_project_id_app(make_provider, gcp, edit):
     edit(lambda d: gemini(d, grantServiceAgent=False))
     deploy(make_provider)
-    assert not any("discoveryengine" in m for m in gcp.policies[("project", "proj-dev")][INVOKER])
+    assert not engine_policy(gcp).get(INVOKER)
 
     # An app addressed by the target project's id still resolves to its number.
     edit(lambda d: gemini(d, app=GE_APP.replace("987654", "proj-dev")))
     deploy(make_provider)
     expected = "serviceAccount:service-123456@gcp-sa-discoveryengine.iam.gserviceaccount.com"
-    assert expected in gcp.policies[("project", "proj-dev")][INVOKER]
+    assert engine_policy(gcp)[INVOKER] == {expected}
 
     edit(lambda d: gemini(d, app=GE_APP.replace("987654", "other-proj")))
-    assert any("cannot derive" in line for line in plan(make_provider)["iam"].details)
+    assert any("cannot derive" in line for line in plan(make_provider)["access"].details)
+
+
+@pytest.mark.parametrize(("value", "scope"), [("restricted", "RESTRICTED"), ("private", "PRIVATE")])
+def test_sharing_scopes(make_provider, gcp, edit, value, scope):
+    edit(lambda d: gemini(d, sharing=value))
+    deploy(make_provider)
+    [agent] = gcp.ge_agents.values()
+    assert agent["payload"]["sharing_config"] == {"scope": scope}
 
 
 def test_invalid_invoker_is_rejected(make_provider, edit):

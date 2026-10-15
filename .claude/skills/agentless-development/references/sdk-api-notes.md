@@ -79,11 +79,25 @@ agents-cli 1.3.1 source (`~/.local/share/uv/tools/google-agents-cli/.../google/a
   {json_agent_card: <card as a JSON string>}, authorization_config: {agent_authorization: <auth name>}}`. An
   existing registration is matched on the stored card's `url` (the A2A endpoint, not the well-known fetch URL).
   agents-cli warns that A2A registration on Agent Runtime is not recommended; `adk` stays the default.
-- **Sharing:** `sharing_config: {scope: "ALL_USERS"}`, masked only when set (a masked field sent empty is reset).
+- **Sharing:** `sharing_config: {scope}` with `ALL_USERS`, `RESTRICTED` (users given access via the console's
+  User permissions), `PRIVATE` (creator and admins); `SCOPE_UNSPECIFIED` behaves as `RESTRICTED`. Masked only when
+  set (a masked field sent empty is reset). No public method sets IAM on a single GE agent: v1, v1beta and v1alpha
+  only have get/setIamPolicy on collections, engines (apps) and data stores (checked 2026-10-15).
   `authorization_config` is always masked, so a dropped authorization is cleared.
 - **App egress gateway:** `GET {app}` → `agentGatewaySetting.defaultEgressAgentGateway.name`; set with
   `PATCH {app}?updateMask=agentGatewaySetting.defaultEgressAgentGateway.name`. A `global` app pairs with a gateway in
   `us-central1`, an `eu` app with `europe-west1` (from the LuminAI Terraform; Google enforces the pairing).
+
+## Reasoning engine IAM
+- `POST https://{region}-aiplatform.googleapis.com/v1/{engine}:getIamPolicy?options.requestedPolicyVersion=3` with
+  an **empty body** (the v1 discovery document has the version as a query parameter and no request body), and
+  `:setIamPolicy` with `{"policy": …}` (etag included; 409/412 on a concurrent change). The SDK has no IAM call for
+  engines, so agentless uses REST.
+- A missing engine may answer 403 rather than 404; agentless treats 403 as gone only when `engine_get` finds nothing.
+- An engine still being created has no policy yet; `access` waits for it (the fake models this).
+- Google's "Share an agent" guide grants a custom role with only `aiplatform.reasoningEngines.query` on the engine.
+  Whether predefined roles such as `roles/aiplatform.user` bind at engine level isn't documented; confirm on the
+  first live run.
 
 ## A2A card (Agent Runtime)
 - **Card URL** (agents-cli `_agent_runtime_a2a.py`):
