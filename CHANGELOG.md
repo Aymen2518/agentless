@@ -6,6 +6,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+- **`agentless eval`** evaluates the deployed engine of a stage on the Agent Platform Evaluation Service, prints each
+  metric against its threshold, saves the report under `.agentless/<stage>/eval/` and exits 1 below a threshold.
+  Needs the new `agentless-cli[eval]` extra.
+- **Deploy gate:** `evaluation.afterDeploy` or `deploy --eval` runs the evaluation after a successful apply and fails
+  the command below a threshold (nothing is rolled back). `--no-eval` skips it.
+- **Online monitors:** `evaluation.monitors` declares Agent Platform online evaluators that score live traces. A new
+  `evaluation` step (after `access`) creates, patches, suspends and deletes them, and recreates them with the
+  engine. They require `observability.tracing.captureContent: true`, and set
+  `OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental` on the engine.
+
 ## [0.6.0] - 2026-10-15
 
 ### Changed

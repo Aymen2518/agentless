@@ -35,6 +35,7 @@ def test_first_deploy_creates_everything(make_provider, gcp, agent_dir):
         "iam": Action.CREATE,
         "engine": Action.CREATE,
         "access": Action.NOOP,
+        "evaluation": Action.NOOP,
         "agentRegistry": Action.NOOP,
         "geminiEnterprise": Action.NOOP,
     }

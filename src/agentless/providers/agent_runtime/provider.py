@@ -199,6 +199,10 @@ class AgentRuntimeProvider:
             out["serviceAccount"] = state.resources["serviceAccount"]["email"]
         if principal := agent_principal(engine.get("effectiveIdentity")):
             out["agentIdentity"] = f"principal://{principal}"
+        if monitors := (state.resources.get("evaluation") or {}).get("monitors"):
+            out["onlineMonitors"] = {
+                k: m["name"] + ("" if m.get("enabled", True) else " (suspended)") for k, m in sorted(monitors.items())
+            }
         if state.resources.get("agentRegistry"):
             out["agentRegistry"] = state.resources["agentRegistry"].get("name")
         if ge := state.resources.get("geminiEnterprise"):

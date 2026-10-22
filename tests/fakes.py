@@ -23,6 +23,7 @@ class FakeGcp:
         self.ge_authorizations: dict[str, dict[str, Any]] = {}
         self.ge_gateways: dict[str, str] = {}  # app -> egress Agent Gateway
         self.registry: dict[str, dict[str, Any]] = {}
+        self.evaluators: dict[str, dict[str, Any]] = {}
         self.buckets: dict[str, dict[str, Any]] = {}
         self.bucket_objects: dict[str, int] = defaultdict(int)
         self.absent_buckets: set[str] = set()  # IAM targets that do not exist (others are assumed to)
@@ -267,6 +268,50 @@ class FakeGcp:
     def registry_delete(self, name: str) -> None:
         self.calls.append(("registry_delete", name))
         self.registry.pop(name, None)
+
+    # online evaluators
+    def evaluator_get(self, name: str) -> dict[str, Any] | None:
+        e = self.evaluators.get(name)
+        return None if e is None else json.loads(json.dumps(e))
+
+    def evaluator_find(self, parent: str, display_name: str, agent: str) -> str | None:
+        return next(
+            (
+                n
+                for n, e in self.evaluators.items()
+                if n.startswith(f"{parent}/") and e["displayName"] == display_name and e["agentResource"] == agent
+            ),
+            None,
+        )
+
+    def evaluator_create(self, parent: str, body: dict[str, Any]) -> str:
+        if body["agentResource"] not in self.engines or self._creating(body["agentResource"]):
+            raise RuntimeError(f"400 agent {body['agentResource']} not found")
+        if not body.get("metricSources"):
+            raise RuntimeError("400 at least one metric source is required")
+        name = f"{parent}/onlineEvaluators/{next(self._ids)}"
+        self.calls.append(("evaluator_create", name))
+        self.evaluators[name] = {**json.loads(json.dumps(body)), "name": name, "state": "ACTIVE"}
+        return name
+
+    def evaluator_patch(self, name: str, body: dict[str, Any], mask: list[str]) -> None:
+        if name not in self.evaluators:
+            raise RuntimeError(f"404 online evaluator {name} not found")
+        if "agentResource" in mask:
+            raise RuntimeError("400 agent_resource is immutable")
+        self.calls.append(("evaluator_patch", name, ",".join(mask)))
+        for field in mask:
+            self.evaluators[name][field] = json.loads(json.dumps(body[field]))
+
+    def evaluator_set_enabled(self, name: str, enabled: bool) -> None:
+        if name not in self.evaluators:
+            raise RuntimeError(f"404 online evaluator {name} not found")
+        self.calls.append(("evaluator_enable" if enabled else "evaluator_suspend", name))
+        self.evaluators[name]["state"] = "ACTIVE" if enabled else "SUSPENDED"
+
+    def evaluator_delete(self, name: str) -> None:
+        self.calls.append(("evaluator_delete", name))
+        self.evaluators.pop(name, None)
 
     def kinds(self) -> list[str]:
         return [c[0] for c in self.calls]

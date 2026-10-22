@@ -80,6 +80,19 @@ observability:
     enabled: true                          # grants cloudtrace.agent, logging.logWriter, monitoring.metricWriter
     captureContent: ${param:captureContent, false}   # prompts/responses in spans; e.g. -p captureContent=true
 
+evaluation:                                # `agentless eval`, the deploy gate and online monitors
+  dataset: tests/eval/datasets/basic-dataset.json   # agents-cli EvaluationDataset
+  dest: gs://acme-agent-evals/${self:service}/${stage}   # default gs://<stagingBucket>/agentless/<service>/<stage>/evals
+  metrics: { final_response_quality: 0.8, tool_use_quality: 0.7, safety: null }   # null = report only
+  afterDeploy: ${param:evalGate, false}    # `deploy` fails below a threshold (or pass --eval)
+  # monitors:                              # online evaluation; needs observability.tracing.captureContent: true
+  #   quality:
+  #     metrics: [safety, final_response_quality]
+  #     samplingPercent: 10
+  #     maxSamplesPerRun: 100
+  #     filter: { minDurationSeconds: 2 }
+  #     enabled: true
+
 access:                                    # IAM on the engine itself, not the project
   invokers: [group:support-users@acme.com]
   role: roles/aiplatform.user              # or a custom role with only aiplatform.reasoningEngines.query

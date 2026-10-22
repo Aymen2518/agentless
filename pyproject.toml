@@ -38,6 +38,9 @@ dependencies = [
     "google-cloud-logging>=3.11",
 ]
 
+[project.optional-dependencies]
+eval = ["google-cloud-aiplatform[agent-engines,evaluation]>=1.163.0,<2"]
+
 [project.urls]
 Homepage = "https://aymen2518.github.io/agentless"
 Documentation = "https://aymen2518.github.io/agentless/getting-started/install/"
