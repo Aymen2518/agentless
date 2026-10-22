@@ -14,6 +14,7 @@
 - [ ] `schema/agent.schema.json` regenerated (`uv run agentless schema -o schema/agent.schema.json`) if the config model changed
 - [ ] `CHANGELOG.md` updated under `[Unreleased]` for user-facing changes
 - [ ] Docs / README updated if behaviour changed
+- [ ] Landing page (`site/`) updated for new user-facing features, and its version badge on a release
 
 ## Manual steps
 

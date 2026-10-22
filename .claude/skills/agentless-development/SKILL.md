@@ -86,6 +86,10 @@ Then, for anything touching GCP calls:
 2. Get an independent review focused on multi-step paths. The first review found 12 bugs the fake had hidden.
 3. Never run `deploy` or `remove` against a shared project without the user's explicit go-ahead.
 
+For a user-facing feature, also update `CHANGELOG.md` under `[Unreleased]`, the README, and the landing page in
+`site/` (feature cards, lifecycle steps, comparison table, demo). On a release, follow `docs/RELEASING.md`: it bumps
+the landing page's version badge too.
+
 ## References
 
 - `references/gotchas.md`: things that already broke once.

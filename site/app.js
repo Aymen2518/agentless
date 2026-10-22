@@ -443,6 +443,20 @@ Full report written to gs://acme-reports-dev/2026-10-11.md.`],
       ],
     },
     {
+      name: "eval",
+      steps: [
+        ["$", "agentless eval --stage dev"],
+        ["out", `  basic-dataset.json: 12 cases against projects/4821…/locations/europe-west1/reasoningEngines/7310… …`],
+        ["wait", "running on the Evaluation Service", 2000],
+        ["out", `<span class=s>  ✔ final_response_quality       0.86  (min 0.80)</span>
+<span class=s>  ✔ tool_use_quality             0.78  (min 0.70)</span>
+  · safety                       0.97
+  run      projects/4821…/locations/europe-west1/evaluationRuns/3305…
+  results  gs://acme-agent-evals/report-agent/dev
+  saved    .agentless/dev/eval/20261022-141203.json`],
+      ],
+    },
+    {
       name: "observe",
       steps: [
         ["$", "agentless metrics --stage dev --since 1h"],
@@ -555,8 +569,8 @@ Full report written to gs://acme-reports-dev/2026-10-11.md.`],
   }
 
   /* ---------------------------------------------------------------
-   * Lifecycle: deploy walks 1→5, remove walks 5→1 and skips
-   * agentIdentity when it was never created.
+   * Lifecycle: deploy walks the steps in order, remove walks them
+   * in reverse.
    * ------------------------------------------------------------- */
   function lifecycle() {
     const graph = $("#life-graph"), svg = $("#life-svg"), items = $$(".ln", graph), btns = $$(".seg button");
@@ -583,8 +597,9 @@ Full report written to gs://acme-reports-dev/2026-10-11.md.`],
       btns.forEach((b) => b.setAttribute("aria-checked", String(b.dataset.dir === dir)));
       items.forEach((el) => el.classList.remove("hit", "deploy", "remove"));
       const { spine, len } = drawSpine(dir);
-      const order = dir === "deploy" ? [0, 1, 2, 3, 4] : [4, 3, 2, 1, 0];
-      const step = reduced ? 0 : 420;
+      const order = items.map((_, i) => i);
+      if (dir === "remove") order.reverse();
+      const step = reduced ? 0 : 300;
       for (let n = 0; n < order.length; n++) {
         if (me !== run) return;
         items[order[n]].classList.add("hit", dir);
