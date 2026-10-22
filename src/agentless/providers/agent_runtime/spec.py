@@ -104,6 +104,8 @@ def _env(project: Project, engine_name: str | None) -> dict[str, str]:
         "SPAN_AND_EVENT" if tracing.capture_content else "NO_CONTENT",
     )
     env.setdefault("ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS", str(tracing.capture_content).lower())
+    if cfg.evaluation.monitors:  # online monitors read the gen_ai semantic conventions from traces
+        env.setdefault("OTEL_SEMCONV_STABILITY_OPT_IN", "gen_ai_latest_experimental")
     if engine_name:
         env.setdefault("APP_URL", app_url(cfg.provider.region, engine_name))
     return env

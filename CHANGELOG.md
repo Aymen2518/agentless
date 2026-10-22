@@ -6,6 +6,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-22
+
+### Added
+- **`agentless eval`** evaluates the deployed engine of a stage on the Agent Platform Evaluation Service, prints each
+  metric against its threshold, saves the report under `.agentless/<stage>/eval/` and exits 1 below a threshold.
+  Needs the new `agentless-cli[eval]` extra.
+- **Deploy gate:** `evaluation.afterDeploy` or `deploy --eval` runs the evaluation after a successful apply and fails
+  the command below a threshold (nothing is rolled back). `--no-eval` skips it.
+- **Online monitors:** `evaluation.monitors` declares Agent Platform online evaluators that score live traces. A new
+  `evaluation` step (after `access`) creates, patches, suspends and deletes them, and recreates them with the
+  engine. They require `observability.tracing.captureContent: true`, and set
+  `OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental` on the engine.
+
 ## [0.6.0] - 2026-10-15
 
 ### Changed
@@ -134,7 +147,8 @@ First public release: wheel and sdist (`agentless-cli`) on the GitHub Release, a
 - Plugins through pluggy entry points in the `agentless` group.
 - Multi-arch container image and Claude Code skills for developing agentless and deploying agents with it.
 
-[Unreleased]: https://github.com/Aymen2518/agentless/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/Aymen2518/agentless/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/Aymen2518/agentless/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/Aymen2518/agentless/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/Aymen2518/agentless/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Aymen2518/agentless/compare/v0.3.0...v0.4.0

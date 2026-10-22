@@ -513,6 +513,64 @@ class GcpClients:
         """Unregister; missing is fine."""
         self._rest("DELETE", f"{_REGISTRY}/v1alpha/{name}")
 
+    # --- online evaluators (Agent Platform v1beta1 REST; every mutation is a long-running operation) --------------
+
+    def _aiplatform(self, name: str) -> str:
+        return f"https://{name.split('/')[3]}-aiplatform.googleapis.com/v1beta1/{name}"
+
+    def _lro(self, operation: dict[str, Any], poll: float = 3, timeout: float = 600) -> dict[str, Any]:
+        """Wait for an aiplatform operation; returns its response."""
+        start = time.monotonic()
+        while not operation.get("done"):
+            if time.monotonic() - start > timeout:
+                raise RuntimeError(f"operation {operation['name']} still running after {int(timeout)}s")
+            time.sleep(poll)
+            operation = self._rest("GET", self._aiplatform(operation["name"]))
+        if operation.get("error"):
+            raise RuntimeError(f"operation {operation['name']} failed: {operation['error']}")
+        return operation.get("response") or {}
+
+    def evaluator_get(self, name: str) -> dict[str, Any] | None:
+        """An online evaluator, or None."""
+        return self._get_or_none(self._aiplatform(name))
+
+    def evaluator_find(self, parent: str, display_name: str, agent: str) -> str | None:
+        """Evaluator of this agent with this display name, e.g. one a crashed run created but never recorded."""
+        url, page_token = f"{self._aiplatform(parent)}/onlineEvaluators", None
+        while True:
+            data = self._rest("GET", url, params={"pageToken": page_token} if page_token else None)
+            for evaluator in data.get("onlineEvaluators", []):
+                if evaluator.get("displayName") == display_name and evaluator.get("agentResource") == agent:
+                    return evaluator["name"]
+            page_token = data.get("nextPageToken")
+            if not page_token:
+                return None
+
+    def evaluator_create(self, parent: str, body: dict[str, Any]) -> str:
+        """Create an online evaluator under `projects/{p}/locations/{l}`; returns its name."""
+        operation = self._rest("POST", f"{self._aiplatform(parent)}/onlineEvaluators", json=body)
+        response = self._lro(operation)
+        if response.get("name"):
+            return response["name"]
+        # The operation name embeds the new evaluator: …/onlineEvaluators/{id}/operations/{op}
+        return operation["name"].split("/operations/")[0]
+
+    def evaluator_patch(self, name: str, body: dict[str, Any], mask: list[str]) -> None:
+        """Update the fields in `mask` (camelCase paths)."""
+        operation = self._rest("PATCH", self._aiplatform(name), params={"updateMask": ",".join(mask)}, json=body)
+        self._lro(operation)
+
+    def evaluator_set_enabled(self, name: str, enabled: bool) -> None:
+        """Activate or suspend an evaluator; its configuration is kept."""
+        operation = self._rest("POST", f"{self._aiplatform(name)}:{'activate' if enabled else 'suspend'}", json={})
+        self._lro(operation)
+
+    def evaluator_delete(self, name: str) -> None:
+        """Delete an evaluator; missing is fine."""
+        operation = self._rest("DELETE", self._aiplatform(name))
+        if operation:
+            self._lro(operation)
+
 
 _REGISTRY = "https://agentregistry.googleapis.com"
 # Patchable registration fields: (payload key, update-mask path), in mask order.

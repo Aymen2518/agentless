@@ -472,6 +472,74 @@ class Access(_Model):
         return v
 
 
+class MonitorFilter(_Model):
+    """Which traces an online monitor scores; all set bounds must hold."""
+
+    min_duration_seconds: float | None = Field(default=None, ge=0, description="Only traces at least this long.")
+    max_duration_seconds: float | None = Field(default=None, ge=0, description="Only traces at most this long.")
+    min_total_tokens: int | None = Field(default=None, ge=0, description="Only traces using at least this many tokens.")
+    max_total_tokens: int | None = Field(default=None, ge=0, description="Only traces using at most this many tokens.")
+
+
+class EvalMonitor(_Model):
+    """An online monitor: samples the deployed agent's traces and scores them about every 10 minutes."""
+
+    metrics: list[str] = Field(
+        min_length=1,
+        description="Predefined metrics, e.g. safety, final_response_quality, tool_use_quality (latest version) or "
+        "a versioned spec name such as safety_v1.",
+    )
+    sampling_percent: int = Field(default=10, ge=1, le=100, description="Share of traces to score.")
+    max_samples_per_run: int | None = Field(default=None, ge=1, description="Cost cap per evaluation run.")
+    filter: MonitorFilter = Field(default_factory=MonitorFilter)
+    enabled: bool = Field(default=True, description="false suspends the monitor and keeps its configuration.")
+    display_name: str | None = Field(default=None, max_length=63, description="Defaults to <service>-<stage>-<key>.")
+
+
+class Evaluation(_Model):
+    """Evaluation of the deployed agent: on demand (`agentless eval`), after deploy, and online monitors."""
+
+    dataset: str | None = Field(
+        default=None, description="agents-cli EvaluationDataset (JSON with eval_cases), relative to agent.yaml."
+    )
+    dest: str | None = Field(
+        default=None,
+        pattern=r"^gs://[^/]+",
+        description="GCS prefix for evaluation results. Defaults to gs://<stagingBucket>/agentless/<service>/<stage>/"
+        "evals when provider.stagingBucket is set.",
+    )
+    metrics: dict[str, float | None] = Field(
+        default_factory=dict,
+        description="Metric name → minimum average score (0 to 1); null reports the metric without gating on it.",
+    )
+    after_deploy: bool = Field(
+        default=False, description="Run the evaluation at the end of `deploy` and fail when a threshold is missed."
+    )
+    monitors: dict[str, EvalMonitor] = Field(default_factory=dict)
+
+    @field_validator("metrics")
+    @classmethod
+    def _thresholds(cls, v: dict[str, float | None]) -> dict[str, float | None]:
+        for name, threshold in v.items():
+            if threshold is not None and not 0 <= threshold <= 1:
+                raise ValueError(f"threshold of {name} must be between 0 and 1, got {threshold}")
+        return v
+
+    @field_validator("monitors")
+    @classmethod
+    def _monitor_keys(cls, v: dict[str, EvalMonitor]) -> dict[str, EvalMonitor]:
+        for key in v:
+            if not re.fullmatch(r"[a-z][a-z0-9-]{0,30}", key):
+                raise ValueError(f"monitor key {key!r} must match [a-z][a-z0-9-]{{0,30}}")
+        return v
+
+    @model_validator(mode="after")
+    def _runnable(self) -> Evaluation:
+        if self.after_deploy and not (self.dataset and self.metrics):
+            raise ValueError("afterDeploy needs a dataset and metrics")
+        return self
+
+
 class AgentConfig(_Model):
     """Root of `agent.yaml`."""
 
@@ -486,6 +554,7 @@ class AgentConfig(_Model):
     memory: Memory = Field(default_factory=Memory)
     publish: Publish = Field(default_factory=Publish)
     observability: Observability = Field(default_factory=Observability)
+    evaluation: Evaluation = Field(default_factory=Evaluation)
     resources: Resources = Field(default_factory=Resources)
     custom: dict[str, Any] = Field(default_factory=dict)
 
@@ -506,6 +575,16 @@ class AgentConfig(_Model):
         if "tracing" in self.observability.model_fields_set:
             raise ValueError("set observability.tracing or the deprecated agent.telemetry, not both")
         self.observability.tracing = Tracing(enabled=legacy.enabled, capture_content=legacy.capture_message_content)
+        return self
+
+    @model_validator(mode="after")
+    def _monitors_need_content(self) -> AgentConfig:
+        tracing = self.observability.tracing
+        if self.evaluation.monitors and not (tracing.enabled and tracing.capture_content):
+            raise ValueError(
+                "evaluation.monitors score prompts and responses from traces: set observability.tracing.enabled "
+                "and observability.tracing.captureContent to true"
+            )
         return self
 
     def deprecations(self) -> list[str]:

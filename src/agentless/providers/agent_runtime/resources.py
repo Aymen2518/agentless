@@ -694,7 +694,7 @@ class EngineResource(Resource):
         if after.get("effectiveIdentity") != before["effectiveIdentity"] and before["effectiveIdentity"]:
             ctx.reapply.add("iam")  # a recreated Agent Identity engine has a new principal
         if after.get("name") != before["name"] and before["name"]:
-            ctx.reapply.update({"access", "agentRegistry", "geminiEnterprise"})
+            ctx.reapply.update({"access", "evaluation", "agentRegistry", "geminiEnterprise"})
 
     def _wait(self, ctx: Context, operation: str) -> None:
         ctx.clients.wait(operation, on_tick=lambda s: ctx.echo(f"    … {int(s // 60)}m{int(s % 60):02d}s"))
@@ -1189,6 +1189,149 @@ def _hash(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()
 
 
+_EVALUATOR_FIELDS = ("displayName", "metricSources", "config", "cloudObservability")  # patchable, in mask order
+_SEMCONV_VERSION = "1.39.0"
+
+
+class EvaluationResource(Resource):
+    """Online monitors (Agent Platform online evaluators) that score the engine's live traces."""
+
+    key = "evaluation"
+
+    def _engine(self, ctx: Context) -> str | None:
+        return (ctx.state.resources.get("engine") or {}).get("name")
+
+    def _bodies(self, ctx: Context, engine: str) -> dict[str, dict[str, Any]]:
+        from agentless.providers.agent_runtime.evals import metric_spec_name
+
+        cfg = ctx.project.config
+        bodies = {}
+        for key, monitor in cfg.evaluation.monitors.items():
+            predicates = []
+            f = monitor.filter
+            for field, op, value in (
+                ("duration", "GREATER_OR_EQUAL", f.min_duration_seconds),
+                ("duration", "LESS_OR_EQUAL", f.max_duration_seconds),
+                ("totalTokenUsage", "GREATER_OR_EQUAL", f.min_total_tokens),
+                ("totalTokenUsage", "LESS_OR_EQUAL", f.max_total_tokens),
+            ):
+                if value is not None:
+                    predicates.append({field: {"comparisonOperator": op, "value": value}})
+            sampling: dict[str, Any] = {"randomSampling": {"percentage": monitor.sampling_percent}}
+            if monitor.max_samples_per_run:
+                sampling["maxEvaluatedSamplesPerRun"] = monitor.max_samples_per_run
+            try:
+                specs = [metric_spec_name(m) for m in monitor.metrics]
+            except ValueError as e:
+                raise RuntimeError(f"evaluation.monitors.{key}: {e}") from e
+            bodies[key] = {
+                "displayName": monitor.display_name or f"{cfg.service}-{cfg.provider.stage}-{key}"[:63],
+                "agentResource": engine,
+                "metricSources": [{"metric": {"predefinedMetricSpec": {"metricSpecName": s}}} for s in specs],
+                "config": sampling,
+                "cloudObservability": {
+                    "openTelemetry": {"semconvVersion": _SEMCONV_VERSION},
+                    "traceScope": {"filter": predicates},
+                },
+            }
+        return bodies
+
+    @staticmethod
+    def _fields(body: dict[str, Any]) -> dict[str, str]:
+        return {f: _hash(body[f]) for f in _EVALUATOR_FIELDS}
+
+    def plan(self, ctx: Context) -> Change:  # noqa: D102
+        monitors = ctx.project.config.evaluation.monitors
+        owned = self._state(ctx).get("monitors") or {}
+        if not monitors and not owned:
+            return Change(self.key, Action.NOOP, "no online monitors")
+        engine = self._engine(ctx)
+        bodies = self._bodies(ctx, engine or "<engine>")
+        details = []
+        for key, body in bodies.items():
+            entry, enabled = owned.get(key), monitors[key].enabled
+            if entry is None:
+                specs = ", ".join(m["metric"]["predefinedMetricSpec"]["metricSpecName"] for m in body["metricSources"])
+                details.append(f"+ {key} ({specs}, {monitors[key].sampling_percent}% of traces)")
+            elif engine and entry.get("engine") != engine:
+                details.append(f"± {key} (engine changed, recreated)")
+            elif ctx.clients.evaluator_get(entry["name"]) is None:
+                details.append(f"+ {key} (deleted outside agentless, recreated)")
+            else:
+                changed = [f for f, h in self._fields(body).items() if entry.get("fields", {}).get(f) != h]
+                if changed:
+                    details.append(f"~ {key}: {', '.join(changed)}")
+                if entry.get("enabled", True) != enabled:
+                    details.append(f"~ {key}: {'activate' if enabled else 'suspend'}")
+        details += [f"- {key}" for key in owned if key not in bodies]
+        if not details:
+            return Change(self.key, Action.NOOP, f"{len(bodies)} online monitor(s)")
+        if not owned:
+            return Change(self.key, Action.CREATE, f"{len(bodies)} online monitor(s)", details)
+        action = Action.DELETE if not bodies else Action.UPDATE
+        return Change(self.key, action, f"{len(bodies)} online monitor(s)", details)
+
+    def apply(self, ctx: Context, change: Change) -> None:  # noqa: D102
+        monitors = ctx.project.config.evaluation.monitors
+        st = {"monitors": dict(self._state(ctx).get("monitors") or {})}
+        owned = st["monitors"]
+        for key in [k for k in owned if k not in monitors]:
+            ctx.clients.evaluator_delete(owned.pop(key)["name"])
+            self._save(ctx, st)
+        if not monitors:
+            return
+        engine, engine_st = self._engine(ctx), ctx.state.resources.get("engine") or {}
+        if not engine or (engine_st.get("pending") and engine_st.get("spec") is None):  # still being created
+            ctx.echo("    engine not ready, online monitors not set up; rerun `agentless deploy` once it is")
+            return
+        cfg = ctx.project.config.provider
+        parent = f"projects/{cfg.project}/locations/{cfg.region}"
+        for key, body in self._bodies(ctx, engine).items():
+            entry, enabled = owned.get(key), monitors[key].enabled
+            if entry is not None and (
+                entry.get("engine") != engine or ctx.clients.evaluator_get(entry["name"]) is None
+            ):
+                ctx.clients.evaluator_delete(entry["name"])  # agentResource is immutable: recreate
+                owned.pop(key)
+                self._save(ctx, st)
+                entry = None
+            if entry is None:
+                name = ctx.clients.evaluator_find(parent, body["displayName"], engine)
+                if name is None:
+                    name = ctx.clients.evaluator_create(parent, body)
+                    entry = {"name": name, "engine": engine, "enabled": True}
+                else:  # created by a run that crashed before saving it: adopt and bring up to date
+                    ctx.clients.evaluator_patch(name, body, list(_EVALUATOR_FIELDS))
+                    entry = {"name": name, "engine": engine, "enabled": None}
+                ctx.echo(f"    {key}: {name}")
+            else:
+                mask = [f for f, h in self._fields(body).items() if entry.get("fields", {}).get(f) != h]
+                if mask:
+                    ctx.clients.evaluator_patch(entry["name"], body, mask)
+            owned[key] = {**entry, "fields": self._fields(body)}
+            self._save(ctx, st)
+            if entry.get("enabled") != enabled:
+                ctx.clients.evaluator_set_enabled(entry["name"], enabled)
+                owned[key] = {**owned[key], "enabled": enabled}
+                self._save(ctx, st)
+
+    def _save(self, ctx: Context, st: dict[str, Any]) -> None:
+        self._set_state(ctx, st if st["monitors"] else None)
+
+    def plan_destroy(self, ctx: Context) -> Change:  # noqa: D102
+        owned = self._state(ctx).get("monitors") or {}
+        if not owned:
+            return Change(self.key, Action.NOOP, "no online monitors")
+        return Change(self.key, Action.DELETE, f"{len(owned)} online monitor(s)", [f"- {k}" for k in owned])
+
+    def destroy(self, ctx: Context) -> None:  # noqa: D102
+        st = {"monitors": dict(self._state(ctx).get("monitors") or {})}
+        for key in list(st["monitors"]):
+            ctx.clients.evaluator_delete(st["monitors"].pop(key)["name"])
+            self._save(ctx, st)
+        self._set_state(ctx, None)
+
+
 ALL_RESOURCES: tuple[type[Resource], ...] = (
     ServiceAccountResource,
     AgentIdentityResource,
@@ -1196,6 +1339,7 @@ ALL_RESOURCES: tuple[type[Resource], ...] = (
     IamResource,
     EngineResource,
     AccessResource,
+    EvaluationResource,
     AgentRegistryResource,
     GeminiEnterpriseResource,
 )

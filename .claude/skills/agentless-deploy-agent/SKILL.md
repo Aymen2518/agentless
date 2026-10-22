@@ -6,8 +6,8 @@ description: Use when deploying or operating an ADK agent (agents-cli project) o
 # Deploying an agent with agentless
 
 agentless reads `agent.yaml` next to an agents-cli project and reconciles GCP with it: the service account, IAM, the
-Agent Runtime engine, Memory Bank, PSC-I and Gemini Enterprise. agents-cli is still the tool for building and
-evaluating the agent. Field reference: `examples/agent.yaml` in the agentless repo. Smallest
+Agent Runtime engine, Memory Bank, PSC-I and Gemini Enterprise. agents-cli is still the tool for building the agent and
+evaluating it locally; agentless evaluates the deployed engine. Field reference: `examples/agent.yaml` in the agentless repo. Smallest
 starting point: `examples/minimal.yaml`.
 
 Check the tool is installed with `agentless version`. If it's missing, install a release from GitHub with
@@ -37,6 +37,11 @@ the image `docker run --rm ghcr.io/Aymen2518/agentless`.
 4. **Plan, which is read-only:** `agentless plan --stage dev`. Fix anything marked ✋ before deploying.
 5. **Deploy:** `agentless deploy --stage dev` (it shows the plan and asks). It takes 5–10 minutes on first create.
 6. **Use it:** `agentless info`, `agentless invoke -m "…"`, `agentless logs --since 30m --tail`.
+   **Evaluate it:** with an `evaluation:` block (dataset and metric thresholds), `agentless eval --stage dev` scores
+   the deployed engine and exits 1 below a threshold (needs `agentless-cli[eval]`). `deploy --eval` or
+   `evaluation.afterDeploy: true` turns that into a gate after deploy. `evaluation.monitors` adds online monitors on
+   live traces and needs `observability.tracing.captureContent: true`. agents-cli stays the tool for evaluating
+   locally while iterating.
 7. **Tear down:** `agentless remove --stage dev` deletes only what agentless created. Buckets and existing SAs stay.
 
 Always show the user the plan and get an explicit go-ahead before running `deploy` or `remove` on their behalf.

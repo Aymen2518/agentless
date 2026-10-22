@@ -22,7 +22,7 @@ from agentless.hooks import plugin_manager, variable_sources
 from agentless.package.packager import PackageError, write_archive
 from agentless.plan.model import Action, ChangeSet, DeployOptions
 from agentless.plan.render import render
-from agentless.providers.agent_runtime import ops
+from agentless.providers.agent_runtime import evals, ops
 from agentless.providers.agent_runtime.provider import AgentRuntimeProvider, DeployError
 from agentless.state.store import StateError
 
@@ -275,6 +275,14 @@ def deploy(
     ] = False,
     no_wait: Annotated[bool, typer.Option("--no-wait", help="Return once the engine operation has started.")] = False,
     status: Annotated[bool, typer.Option("--status", help="Check/finalize a --no-wait deployment.")] = False,
+    run_eval: Annotated[
+        bool | None,
+        typer.Option(
+            "--eval/--no-eval",
+            help="Evaluate the deployed agent afterwards and exit 1 below a threshold (default: "
+            "evaluation.afterDeploy). --eval also evaluates when there was nothing to deploy.",
+        ),
+    ] = None,
     impersonate: ImpersonateOpt = None,
 ) -> None:
     """Reconcile GCP with agent.yaml: identity, IAM, engine, memory, networking, Gemini Enterprise."""
@@ -292,6 +300,87 @@ def deploy(
     if applied is not None:
         typer.secho("✔ deployed", fg=typer.colors.GREEN)
         _print_info(provider.info())
+    gate = project.config.evaluation.after_deploy if run_eval is None else run_eval
+    if not gate or (applied is None and run_eval is None):
+        return
+    if no_wait:
+        typer.secho("⚠ evaluation skipped: the engine is still deploying (--no-wait)", fg=typer.colors.YELLOW)
+        return
+    if not _evaluate(project, provider, None, {}, None):
+        _fail("evaluation below threshold" + (" (the deployment stays in place)" if applied is not None else ""))
+
+
+def _evaluate(
+    project: Project,
+    provider: AgentRuntimeProvider,
+    dataset: Path | None,
+    overrides: dict[str, float | None],
+    output: Path | None,
+    as_json: bool = False,
+) -> bool:
+    """Run the evaluation against the stage's engine, print and save the results; False when a threshold fails."""
+    cfg, ev = project.config, project.config.evaluation
+    path = dataset or (project.config_path.parent / ev.dataset if ev.dataset else None)
+    if path is None:
+        raise ConfigError("no dataset: set evaluation.dataset or pass --dataset")
+    if not path.is_file():
+        raise ConfigError(f"evaluation dataset {path} not found")
+    thresholds = {**ev.metrics, **overrides}
+    if not thresholds:
+        raise ConfigError("no metrics: set evaluation.metrics or pass --metric name[=threshold]")
+    dest = ev.dest or (
+        f"gs://{cfg.provider.staging_bucket}/agentless/{cfg.service}/{cfg.provider.stage}/evals"
+        if cfg.provider.staging_bucket
+        else None
+    )
+    if dest is None:
+        raise ConfigError("no results location: set evaluation.dest or provider.stagingBucket")
+    try:
+        data = json.loads(path.read_text())
+    except json.JSONDecodeError as e:
+        raise ConfigError(f"evaluation dataset {path} is not valid JSON: {e}") from e
+    engine = _engine_name(provider)
+    stamp = datetime.datetime.now(tz=datetime.UTC).strftime("%Y%m%d-%H%M%S")
+    log = (lambda m: typer.secho(m, err=True)) if as_json else typer.echo
+    log(f"  {path.name}: {len(data.get('eval_cases', []))} cases against {engine} …")
+    run = evals.run(
+        project=cfg.provider.project,
+        region=cfg.provider.region,
+        engine=engine,
+        dataset=data,
+        dest=dest,
+        metrics=list(thresholds),
+        credentials=project.deployer.credentials(),
+        display_name=f"{cfg.service}-{cfg.provider.stage}-{stamp}",
+        on_tick=lambda state, s: log(f"  … {state.lower()} {int(s // 60)}m{int(s % 60):02d}s"),
+    )
+    results = evals.verdict(run["summary"], thresholds)
+    passed = all(r.passed is not False for r in results)
+    report = {
+        "engine": engine,
+        "run": run["name"],
+        "dataset": str(path),
+        "dest": dest,
+        "passed": passed,
+        "metrics": [{"name": r.name, "score": r.score, "threshold": r.threshold, "passed": r.passed} for r in results],
+        "summary": run["summary"],
+    }
+    out = output or project.config_path.parent / ".agentless" / cfg.provider.stage / "eval" / f"{stamp}.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(report, indent=2) + "\n")
+    if as_json:
+        typer.echo(json.dumps(report, indent=2))
+        return passed
+    for r in results:
+        score = "-" if r.score is None else f"{r.score:.2f}"
+        limit = "" if r.threshold is None else f"  (min {r.threshold:.2f})"
+        mark = {True: "✔", False: "✖", None: "·"}[r.passed]
+        typer.secho(
+            f"  {mark} {r.name:<28} {score}{limit}",
+            fg={True: typer.colors.GREEN, False: typer.colors.RED, None: None}[r.passed],
+        )
+    typer.echo(f"  run      {run['name']}\n  results  {dest}\n  saved    {out}")
+    return passed
 
 
 def _print_info(info: dict[str, Any]) -> None:
@@ -452,6 +541,49 @@ def invoke(
             author, text = ops.event_text(event)
             if text:
                 typer.echo(f"[{author}] {text}")
+
+
+def _metric_overrides(raw: list[str] | None) -> dict[str, float | None]:
+    out: dict[str, float | None] = {}
+    for item in raw or []:
+        name, sep, value = item.partition("=")
+        try:
+            threshold = float(value) if sep and value.strip() else None
+        except ValueError:
+            raise ConfigError(f"--metric expects name or name=threshold, got {item!r}") from None
+        if threshold is not None and not 0 <= threshold <= 1:
+            raise ConfigError(f"--metric threshold must be between 0 and 1, got {item!r}")
+        out[name.strip()] = threshold
+    return out
+
+
+@app.command("eval")
+@handle_errors
+def eval_(
+    config: ConfigOpt = Path(DEFAULT_CONFIG_FILE),
+    stage: StageOpt = None,
+    param: ParamOpt = None,
+    dataset: Annotated[
+        Path | None, typer.Option("--dataset", "-d", help="EvaluationDataset JSON (default: evaluation.dataset).")
+    ] = None,
+    metric: Annotated[
+        list[str] | None,
+        typer.Option("--metric", "-m", help="Add or override a metric: name or name=threshold. Repeatable."),
+    ] = None,
+    output: Annotated[
+        Path | None, typer.Option("--output", "-o", help="Results file (default: .agentless/<stage>/eval/<ts>.json).")
+    ] = None,
+    as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output.")] = False,
+    impersonate: ImpersonateOpt = None,
+) -> None:
+    """Evaluate the deployed agent on a dataset (Agent Platform Evaluation Service); exit 1 below a threshold."""
+    project, pm = _load(config, stage, param, impersonate)
+    if not as_json:
+        _header(project, "Evaluating")
+    if not _evaluate(project, _provider(project, pm), dataset, _metric_overrides(metric), output, as_json):
+        if not as_json:
+            typer.secho("✖ evaluation below threshold", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
 
 
 @app.command()

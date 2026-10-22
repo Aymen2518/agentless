@@ -59,3 +59,19 @@
   maps them back.
 - **A newly created SA isn't visible to IAM** for a few seconds. `_retry` treats `BadRequest … does not exist` as
   transient.
+
+## Evaluation
+- **`vertexai._genai.evals` imports pandas at module level.** `agentless eval` therefore needs the
+  `agentless-cli[eval]` extra (`google-cloud-aiplatform[evaluation]`). `evals.run` imports it lazily and turns the
+  ImportError into a clear message; `_evals_constant` (metric spec names) imports without it.
+- **Metric names are versioned spec names** (`safety_v3`, `final_response_quality_v2`). `evals.metric_spec_name`
+  resolves a bare name to the latest version with the SDK's own table. Summary keys look like
+  `<candidate>/<spec name>/AVERAGE`, so `evals.verdict` matches on the name without its `_vN` suffix.
+- **Online evaluators have no client-chosen ID** and every mutation is an LRO. A crash between create and the state
+  save would orphan one, so `apply` first looks for an evaluator with the same display name and `agentResource`
+  (`evaluator_find`) and adopts it.
+- **`agentResource` is immutable:** a recreated engine means delete and create the monitor (`ctx.reapply` from
+  `EngineResource`).
+- **Not verified live yet:** the unit of the `duration` trace predicate (sent as `minDurationSeconds` unchanged),
+  whether the Evaluation Service's service agent needs an explicit grant on `evaluation.dest`, and the REST request
+  shapes of `onlineEvaluators` (taken from the v1beta1 protos in the pinned SDK).

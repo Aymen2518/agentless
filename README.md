@@ -2,7 +2,7 @@
 
 Serverless Framework–style deployments for ADK agents on **Google Cloud Agent Platform (Agent Runtime)**.
 
-You build the agent with `agents-cli` (scaffold, playground, eval). You describe *where and how* it runs in one
+You build the agent with `agents-cli` (scaffold, playground, local eval). You describe *where and how* it runs in one
 `agent.yaml`. Then:
 
 ```bash
@@ -60,8 +60,9 @@ agent.yaml ──► load ──► resolve ${…} ──► validate ──► 
 | 3 | `iam` | role bindings for the runtime identity: project, org, buckets, secrets, datasets, SAs |
 | 4 | `engine` | the reasoning engine: config (with update masks) and code (source tarball, rebuilt only when the hash changes) |
 | 5 | `access` | who may call the agent: bindings on the engine itself (`access.invokers`, the GE service agent) |
-| 6 | `agentRegistry` | the agent's A2A card, registered as a service in the Agent Registry |
-| 7 | `geminiEnterprise` | registration in a Gemini Enterprise app (ADK or A2A), plus its OAuth authorization |
+| 6 | `evaluation` | online monitors: Agent Platform online evaluators that score the engine's live traces |
+| 7 | `agentRegistry` | the agent's A2A card, registered as a service in the Agent Registry |
+| 8 | `geminiEnterprise` | registration in a Gemini Enterprise app (ADK or A2A), plus its OAuth authorization |
 
 **State** is one JSON object per service and stage. It lives in `gs://<stagingBucket>/agentless/<service>/<stage>/`,
 or in `.agentless/<stage>/` locally when `stagingBucket` is unset. It records:
@@ -80,7 +81,7 @@ Each deploy diffs the desired config against this record and against live GCP re
 |---|---|
 | **agentless** (`agent.yaml`) | everything per agent: SA, IAM grants, buckets the agent owns (reports, outputs), engine config and code, Memory Bank, PSC-I, Agent Registry and GE registration |
 | **Your infrastructure-as-code** (Terraform, etc.) | per environment: APIs, deployer SA, state bucket, telemetry dataset, the Gemini Enterprise app and Agent Gateway, and shared data resources (datasets, secrets, buckets used by several agents) |
-| **agents-cli** | developing the agent: scaffold, playground, eval. It reads the `deployment_metadata.json` agentless writes, so `run --url` and `publish` still work |
+| **agents-cli** | developing the agent: scaffold, playground, local eval. agentless evaluates the *deployed* engine (`agentless eval`, online monitors). agents-cli reads the `deployment_metadata.json` agentless writes, so `run --url` and `publish` still work |
 
 ## Install
 
@@ -236,6 +237,7 @@ identity:
 | `publish.agentRegistry` | register the A2A card in the Agent Registry | Agent Registry `services` |
 | `publish.geminiEnterprise` | register in a GE app (ADK or A2A), sharing, app egress gateway, optional OAuth authorization with scopes | Discovery Engine `agents` / `authorizations` / app `agentGatewaySetting` |
 | `resources.buckets` | GCS buckets agentless creates, with access for the agent and the name in an env var | Cloud Storage buckets, bucket IAM |
+| `evaluation` | dataset, metrics and thresholds for `agentless eval` and the deploy gate; online monitors on live traffic | Evaluation Service `evaluationRuns` / `onlineEvaluators` |
 | `observability.tracing` | Cloud Trace export (on by default), prompt/response capture (off by default), runtime roles granted automatically | env vars, same as agents-cli; project IAM |
 
 ### Buckets
@@ -309,6 +311,56 @@ observability:
 
 agentless also grants some access automatically. Each secret in `agent.secrets` gets `secretAccessor`, and
 `memory.artifactsBucket` gets `storage.objectUser`.
+
+### Evaluation
+
+agentless evaluates the agent **as deployed**: the engine of the selected stage, with its real identity, tools and
+data. Keep using `agents-cli eval` to iterate on the agent locally.
+
+```yaml
+observability:
+  tracing: { enabled: true, captureContent: true }   # online monitors read prompts and responses from traces
+
+evaluation:
+  dataset: tests/eval/datasets/basic-dataset.json    # agents-cli EvaluationDataset, relative to agent.yaml
+  dest: gs://acme-agent-evals/support-agent/${stage} # default gs://<stagingBucket>/agentless/<service>/<stage>/evals
+  metrics:                                           # name: minimum average score (0 to 1); null = report only
+    final_response_quality: 0.8
+    tool_use_quality: 0.7
+    safety: null
+  afterDeploy: ${param:evalGate, false}              # run as a gate at the end of `deploy`
+  monitors:                                          # online evaluation of live traffic
+    quality:
+      metrics: [safety, final_response_quality]
+      samplingPercent: 10                            # share of traces scored
+      maxSamplesPerRun: 100                          # cost cap per run (about every 10 minutes)
+      filter: { minDurationSeconds: 2 }              # optional: duration and total token bounds
+      enabled: true                                  # false suspends it and keeps the configuration
+```
+
+- **On demand:** `agentless eval --stage dev` runs the dataset against the deployed engine on the Agent Platform
+  Evaluation Service (inference and grading server-side, the same runs as `agents-cli eval submit --resource-name`).
+  It prints each metric's average against its threshold, saves the report under `.agentless/<stage>/eval/`, and exits
+  1 when a threshold is missed. `--dataset` and `--metric name=threshold` override the YAML for one run.
+- **Deploy gate:** with `afterDeploy: true` (or `deploy --eval`), `deploy` evaluates once the apply succeeded and
+  exits 1 below a threshold. Nothing is rolled back: the new version stays deployed, and the pipeline stops before
+  the next stage. A deploy with nothing to apply skips the gate unless `--eval` is passed; `--no-wait` always skips
+  it. `--no-eval` turns it off for one run.
+- **Metrics** are the Evaluation Service's predefined metrics: `safety`, `final_response_quality`,
+  `tool_use_quality`, `general_quality`, `grounding`, `hallucination`, `instruction_following`,
+  `multi_turn_task_success`, … A bare name uses the latest version; a spec name such as `safety_v1` pins one.
+- **Online monitors** are reconciled like any resource: `plan` shows them, changes patch only the changed fields,
+  `enabled: false` suspends, removing one from the YAML deletes it, and a recreated engine gets new monitors (the
+  agent is fixed at creation). They need tracing with content capture, which `validate` checks, and agentless sets
+  `OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental` on the engine. Scores show in the console (Agents ›
+  Deployments › the agent › Dashboard › Evaluation) and in Cloud Monitoring.
+- **Install the extra** for `agentless eval`: `uv tool install "agentless-cli[eval] @ git+https://github.com/Aymen2518/agentless@<tag>"`.
+  It adds the SDK's evaluation dependencies (pandas and others). Online monitors need nothing extra.
+
+```bash
+# CI: deploy dev, gate on quality, then promote
+agentless deploy --stage dev --eval && agentless deploy --stage prod
+```
 
 ### Publishing
 
@@ -412,6 +464,8 @@ needs prod's environment variables.
   a short hash. Prefer `agent.secrets`, which keeps the value in Secret Manager entirely.
 - State is saved after each resource, and after each IAM target. A failed `remove` keeps state for what's left, so
   rerunning finishes the job.
+- Online monitors run as the project's Agent Platform service agent. Anyone who can create online evaluators can
+  attach one to any agent of the project, so keep `aiplatform.onlineEvaluators.create` to deployers.
 - `--no-wait` records the pending operation in state. Run `deploy --status` to finalize it. Any other deploy is
   blocked until you do.
 
@@ -423,12 +477,13 @@ needs prod's environment variables.
 | `validate` / `print` | check / show the resolved config (`print` masks values from `${secret:}`) |
 | `package [-o out.tgz]` | list the files to upload and their hash |
 | `plan [--detailed-exitcode]` | diff; exit code 2 when there are changes |
-| `deploy [-y] [--force] [--code-only] [--allow-replace] [--no-wait] [--status]` | apply |
+| `deploy [-y] [--force] [--code-only] [--allow-replace] [--no-wait] [--status] [--eval/--no-eval]` | apply, then optionally gate on `agentless eval` |
 | `info [--json]` | engine, SA, principal, URLs, GE registration |
 | `logs [--since 1h] [--severity WARNING] [--tail]` | Cloud Logging for the engine |
 | `metrics [--since 1h] [--json]` | request count, 5xx rate, p50/p95 latency (Cloud Monitoring) |
 | `open [console\|logs\|traces] [--print]` | Cloud Console page for the engine |
 | `invoke -m "..." [--session ID] [--raw]` | `:streamQuery`, same as `agents-cli run --mode adk` |
+| `eval [--dataset F] [--metric name=min] [--json] [-o out.json]` | evaluate the deployed engine; exit 1 below a threshold |
 | `remove [-y]` | delete the stage (non-interactive runs need `--yes`) |
 | `unlock` | release a stale lock |
 | `schema [-o file]` | JSON Schema for `agent.yaml` |
@@ -443,7 +498,8 @@ Without a TTY (CI), `deploy` applies without asking, like `serverless deploy`. W
 
 | Principal | Roles |
 |---|---|
-| Deployer (your user, a CI service account via Workload Identity Federation, or the impersonated `provider.deployer`) | `roles/aiplatform.admin`, `roles/iam.serviceAccountAdmin`, `roles/iam.serviceAccountUser`, `roles/resourcemanager.projectIamAdmin`, `roles/storage.objectAdmin` on the state bucket, `roles/secretmanager.admin` (or `setIamPolicy`) on the agent's secrets, `roles/discoveryengine.editor` to publish (`roles/discoveryengine.admin` on the app for `agentGateway`), `roles/agentregistry.editor` for `publish.agentRegistry`, `roles/storage.admin` when `resources.buckets` is used, `roles/monitoring.viewer` for `agentless metrics`. Org-level grants also need org IAM admin. Leave `identity.roles.organization` out until that's approved. |
+| Deployer (your user, a CI service account via Workload Identity Federation, or the impersonated `provider.deployer`) | `roles/aiplatform.admin`, `roles/iam.serviceAccountAdmin`, `roles/iam.serviceAccountUser`, `roles/resourcemanager.projectIamAdmin`, `roles/storage.objectAdmin` on the state bucket, `roles/secretmanager.admin` (or `setIamPolicy`) on the agent's secrets, `roles/discoveryengine.editor` to publish (`roles/discoveryengine.admin` on the app for `agentGateway`), `roles/agentregistry.editor` for `publish.agentRegistry`, `roles/storage.admin` when `resources.buckets` is used, `roles/monitoring.viewer` for `agentless metrics`, `roles/storage.objectAdmin` on `evaluation.dest` for `agentless eval`. Org-level grants also need org IAM admin. Leave `identity.roles.organization` out until that's approved. |
+| Vertex AI service agents (evaluation) | the Evaluation Service writes results to `evaluation.dest` and calls the engine; grant its service agent `roles/storage.objectAdmin` on that bucket if the run reports a permission error |
 | Caller, when impersonating a deployer | `roles/iam.serviceAccountTokenCreator` on the deployer SA (and on each delegate) |
 | Runtime SA or Agent Identity principal | what `identity.roles` lists, plus automatic grants: secrets, the artifacts bucket, declared buckets, and with tracing on `cloudtrace.agent`, `logging.logWriter`, `monitoring.metricWriter` |
 
@@ -551,10 +607,11 @@ docker run --rm \
 | `src/agentless/plan/render.py` | coloured plan output |
 | `src/agentless/hooks.py` | pluggy hook specs and plugin loading |
 | `src/agentless/providers/agent_runtime/provider.py` | orchestration: plan, deploy (lock → plan → confirm → apply → reapply → cleanup), status, remove, info |
-| `src/agentless/providers/agent_runtime/resources.py` | the five resources above |
+| `src/agentless/providers/agent_runtime/resources.py` | the resources above |
 | `src/agentless/providers/agent_runtime/spec.py` | `agent.yaml` → engine spec, diff, update masks, API payloads, secret redaction |
 | `src/agentless/providers/agent_runtime/clients.py` | the only module that calls GCP (Agent Platform SDK, IAM, Resource Manager, Secret Manager, Storage, BigQuery, Discovery Engine REST) |
 | `src/agentless/providers/agent_runtime/ops.py` | `logs`, `metrics`, console links and `invoke` |
+| `src/agentless/providers/agent_runtime/evals.py` | `eval` and the deploy gate: metric names, evaluation runs, thresholds |
 | `tests/fakes.py` | `FakeGcp`, an in-memory stand-in for `clients.py` used by the provider tests |
 | `examples/`, `schema/` | reference configs, and the JSON Schema generated by `agentless schema` |
 

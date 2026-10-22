@@ -422,6 +422,134 @@
       "title": "Encryption",
       "type": "object"
     },
+    "EvalMonitor": {
+      "additionalProperties": false,
+      "description": "An online monitor: samples the deployed agent's traces and scores them about every 10 minutes.",
+      "properties": {
+        "metrics": {
+          "description": "Predefined metrics, e.g. safety, final_response_quality, tool_use_quality (latest version) or a versioned spec name such as safety_v1.",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Metrics",
+          "type": "array"
+        },
+        "samplingPercent": {
+          "default": 10,
+          "description": "Share of traces to score.",
+          "maximum": 100,
+          "minimum": 1,
+          "title": "Samplingpercent",
+          "type": "integer"
+        },
+        "maxSamplesPerRun": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Cost cap per evaluation run.",
+          "title": "Maxsamplesperrun"
+        },
+        "filter": {
+          "$ref": "#/$defs/MonitorFilter"
+        },
+        "enabled": {
+          "default": true,
+          "description": "false suspends the monitor and keeps its configuration.",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "displayName": {
+          "anyOf": [
+            {
+              "maxLength": 63,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Defaults to <service>-<stage>-<key>.",
+          "title": "Displayname"
+        }
+      },
+      "required": [
+        "metrics"
+      ],
+      "title": "EvalMonitor",
+      "type": "object"
+    },
+    "Evaluation": {
+      "additionalProperties": false,
+      "description": "Evaluation of the deployed agent: on demand (`agentless eval`), after deploy, and online monitors.",
+      "properties": {
+        "dataset": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "agents-cli EvaluationDataset (JSON with eval_cases), relative to agent.yaml.",
+          "title": "Dataset"
+        },
+        "dest": {
+          "anyOf": [
+            {
+              "pattern": "^gs://[^/]+",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "GCS prefix for evaluation results. Defaults to gs://<stagingBucket>/agentless/<service>/<stage>/evals when provider.stagingBucket is set.",
+          "title": "Dest"
+        },
+        "metrics": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "description": "Metric name \u2192 minimum average score (0 to 1); null reports the metric without gating on it.",
+          "title": "Metrics",
+          "type": "object"
+        },
+        "afterDeploy": {
+          "default": false,
+          "description": "Run the evaluation at the end of `deploy` and fail when a threshold is missed.",
+          "title": "Afterdeploy",
+          "type": "boolean"
+        },
+        "monitors": {
+          "additionalProperties": {
+            "$ref": "#/$defs/EvalMonitor"
+          },
+          "title": "Monitors",
+          "type": "object"
+        }
+      },
+      "title": "Evaluation",
+      "type": "object"
+    },
     "GeminiEnterprise": {
       "additionalProperties": false,
       "description": "Gemini Enterprise registration.",
@@ -673,6 +801,70 @@
         }
       },
       "title": "MemoryBank",
+      "type": "object"
+    },
+    "MonitorFilter": {
+      "additionalProperties": false,
+      "description": "Which traces an online monitor scores; all set bounds must hold.",
+      "properties": {
+        "minDurationSeconds": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Only traces at least this long.",
+          "title": "Mindurationseconds"
+        },
+        "maxDurationSeconds": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Only traces at most this long.",
+          "title": "Maxdurationseconds"
+        },
+        "minTotalTokens": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Only traces using at least this many tokens.",
+          "title": "Mintotaltokens"
+        },
+        "maxTotalTokens": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Only traces using at most this many tokens.",
+          "title": "Maxtotaltokens"
+        }
+      },
+      "title": "MonitorFilter",
       "type": "object"
     },
     "Network": {
@@ -1170,6 +1362,9 @@
     },
     "observability": {
       "$ref": "#/$defs/Observability"
+    },
+    "evaluation": {
+      "$ref": "#/$defs/Evaluation"
     },
     "resources": {
       "$ref": "#/$defs/Resources"
