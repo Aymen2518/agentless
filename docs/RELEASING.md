@@ -26,8 +26,12 @@ Otherwise the `verify` job fails before anything is published.
 2. **Update `CHANGELOG.md`.** Move the `[Unreleased]` entries into a new `## [X.Y.Z] - YYYY-MM-DD` section and add the
    compare link at the bottom. The release notes are taken from this section. A pre-release such as `X.Y.Zrc1` uses
    its own `## [X.Y.Zrc1]` section if there is one, otherwise the `## [X.Y.Z]` section.
-3. **Open a PR, get CI green, merge** to `main`.
-4. **Tag the merged commit and push the tag:**
+3. **Update the landing page** in [`site/`](../site) (final releases only): the version badge in `index.html`, and
+   every user-facing feature of the release in the hero, the feature cards, the lifecycle steps, the comparison
+   table and, where it helps, a demo chapter in `app.js`. The `site` workflow publishes it to GitHub Pages when it
+   reaches `main`.
+4. **Open a PR, get CI green, merge** to `main`.
+5. **Tag the merged commit and push the tag:**
 
    ```bash
    git switch main && git pull
@@ -35,9 +39,9 @@ Otherwise the `verify` job fails before anything is published.
    git push origin vX.Y.Z
    ```
 
-5. **Watch the run:** `gh run watch -R Aymen2518/agentless`. A failed run can be re-run; the release step uploads
+6. **Watch the run:** `gh run watch -R Aymen2518/agentless`. A failed run can be re-run; the release step uploads
    with `--clobber` if the release already exists.
-6. **Bump the Homebrew formula** (final releases only, not release candidates) in
+7. **Bump the Homebrew formula** (final releases only, not release candidates) in
    [Aymen2518/homebrew-tap](https://github.com/Aymen2518/homebrew-tap):
 
    ```bash
@@ -50,7 +54,7 @@ Otherwise the `verify` job fails before anything is published.
    ```
 
    Until this is done, `brew upgrade agentless` keeps the previous version.
-7. **After a release candidate**, check it (below), then repeat from step 1 with `__version__ = "X.Y.Z"`.
+8. **After a release candidate**, check it (below), then repeat from step 1 with `__version__ = "X.Y.Z"`.
 
 ## Check a release
 
