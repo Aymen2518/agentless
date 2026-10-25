@@ -356,7 +356,9 @@ def _target(k: IamKey) -> str:
 def _why(k: IamKey, automatic: set[IamKey]) -> str:
     if k not in automatic:
         return ""
-    return " (automatic: resources.buckets)" if k[0] == "bucket" else " (automatic: tracing)"
+    if k[0] == "bucket":
+        return " (automatic: resources.buckets)"
+    return " (automatic: sessions)" if k[2] == "roles/aiplatform.user" else " (automatic: tracing)"
 
 
 TRACING_ROLES = ("roles/cloudtrace.agent", "roles/logging.logWriter", "roles/monitoring.metricWriter")
@@ -416,6 +418,8 @@ class IamResource(Resource):
         }
         if cfg.observability.tracing.enabled and cfg.identity.type != IdentityType.PLATFORM:
             out |= {("project", cfg.provider.project, role, member) for role in TRACING_ROLES}
+        if cfg.session_engine:  # a Cloud Run agent keeps its sessions and memories in a companion engine
+            out.add(("project", cfg.provider.project, "roles/aiplatform.user", member))
         return out
 
     def _owned(self, ctx: Context) -> set[IamKey]:
@@ -771,6 +775,8 @@ class AccessResource(Resource):
     """
 
     key = "access"
+    rtype = "reasoningEngine"  # IAM resource type of the callable target
+    noun = "engine"
 
     @staticmethod
     def _engine(ctx: Context) -> str | None:
@@ -780,16 +786,21 @@ class AccessResource(Resource):
 
     @staticmethod
     def members(ctx: Context) -> list[str]:
-        """Members that should hold access.role on the engine."""
+        """Members that should hold the invoker role on the engine (or service)."""
         cfg = ctx.project.config
         out = list(dict.fromkeys(cfg.access.invokers))
         if (member := ge_service_agent(ctx)) and member not in out:
             out.append(member)
         return out
 
+    @staticmethod
+    def role(ctx: Context) -> str:
+        """Role that lets a member call the agent."""
+        return ctx.project.config.access.role
+
     def _desired(self, ctx: Context, engine: str) -> set[IamKey]:
-        role = ctx.project.config.access.role
-        return {("reasoningEngine", engine, role, m) for m in self.members(ctx)}
+        role = self.role(ctx)
+        return {(self.rtype, engine, role, m) for m in self.members(ctx)}
 
     def _owned(self, ctx: Context) -> set[IamKey]:
         return {tuple(b) for b in self._state(ctx).get("bindings", [])}  # type: ignore[misc]
@@ -813,7 +824,7 @@ class AccessResource(Resource):
         owned, desired = self._owned(ctx), self._desired(ctx, engine)
         live: dict[str, dict[str, set[str]] | None] = {}
         for name in sorted({k[1] for k in owned | desired}):
-            live[name] = ctx.clients.iam_members("reasoningEngine", name)
+            live[name] = ctx.clients.iam_members(self.rtype, name)
 
         def granted(k: IamKey) -> bool:
             return k[3] in (live[k[1]] or {}).get(k[2], set())
@@ -826,19 +837,19 @@ class AccessResource(Resource):
 
     def plan(self, ctx: Context) -> Change:  # noqa: D102
         engine, owned, notes = self._engine(ctx), self._owned(ctx), self._notes(ctx)
-        role = ctx.project.config.access.role
+        role = self.role(ctx)
         if engine is None:
             members = self.members(ctx)
             if not members:
                 return Change(self.key, Action.NOOP, "no invokers", notes)
-            details = [f"+ {role} on the engine → {m}" for m in members] + notes
-            return Change(self.key, Action.CREATE, f"{len(members)} binding(s) once the engine exists", details)
+            details = [f"+ {role} on the {self.noun} → {m}" for m in members] + notes
+            return Change(self.key, Action.CREATE, f"{len(members)} binding(s) once the {self.noun} exists", details)
         to_add, to_remove, foreign, gone = self._diff(ctx, engine)
         # Recorded but neither granted nor wanted (a crash between recording and granting): forget them.
         stale = owned - self._desired(ctx, engine) - gone - to_remove
-        details = [f"+ {k[2]} on the engine → {k[3]}" for k in sorted(to_add)]
-        details += [f"- {k[2]} on the engine → {k[3]}" for k in sorted(to_remove)]
-        details += [f"= {k[2]} on the engine → {k[3]} (already granted, not managed)" for k in sorted(foreign)]
+        details = [f"+ {k[2]} on the {self.noun} → {k[3]}" for k in sorted(to_add)]
+        details += [f"- {k[2]} on the {self.noun} → {k[3]}" for k in sorted(to_remove)]
+        details += [f"= {k[2]} on the {self.noun} → {k[3]} (already granted, not managed)" for k in sorted(foreign)]
         details += notes
         if not to_add and not to_remove and not gone and not stale:
             return Change(self.key, Action.NOOP, f"{len(owned)} managed binding(s)", details)
@@ -849,11 +860,11 @@ class AccessResource(Resource):
         engine = self._engine(ctx)
         if engine is None:
             if self.members(ctx):
-                ctx.echo("    engine not ready, access not granted; rerun `agentless deploy` once it is")
+                ctx.echo(f"    {self.noun} not ready, access not granted; rerun `agentless deploy` once it is")
             return
-        if ctx.clients.iam_members("reasoningEngine", engine) is None:
+        if ctx.clients.iam_members(self.rtype, engine) is None:
             if self.members(ctx):
-                ctx.echo("    engine not ready, access not granted; rerun `agentless deploy` once it is")
+                ctx.echo(f"    {self.noun} not ready, access not granted; rerun `agentless deploy` once it is")
             return
         to_add, to_remove, _, gone = self._diff(ctx, engine)
         owned = self._owned(ctx) - gone
@@ -865,7 +876,7 @@ class AccessResource(Resource):
             # Record grants before making them: a crash then leaves a tracked binding (re-added or dropped next
             # run), never an untracked one that later runs would treat as foreign and keep forever.
             self._save(ctx, owned | add)
-            ctx.clients.iam_modify("reasoningEngine", name, [(k[2], k[3]) for k in add], [(k[2], k[3]) for k in remove])
+            ctx.clients.iam_modify(self.rtype, name, [(k[2], k[3]) for k in add], [(k[2], k[3]) for k in remove])
             owned = (owned | add) - remove
         self._save(ctx, owned)
 
@@ -877,15 +888,15 @@ class AccessResource(Resource):
             self.key,
             Action.DELETE,
             f"revoke {len(owned)} binding(s)",
-            [f"- {k[2]} on the engine → {k[3]}" for k in sorted(owned)],
+            [f"- {k[2]} on the {self.noun} → {k[3]}" for k in sorted(owned)],
         )
 
     def destroy(self, ctx: Context) -> None:  # noqa: D102
         owned = self._owned(ctx)
         for name in sorted({k[1] for k in owned}):
             keys = {k for k in owned if k[1] == name}
-            if ctx.clients.iam_members("reasoningEngine", name) is not None:
-                ctx.clients.iam_modify("reasoningEngine", name, [], [(k[2], k[3]) for k in keys])
+            if ctx.clients.iam_members(self.rtype, name) is not None:
+                ctx.clients.iam_modify(self.rtype, name, [], [(k[2], k[3]) for k in keys])
             owned -= keys
             self._save(ctx, owned)
 
@@ -900,9 +911,16 @@ def is_a2a(ctx: Context) -> bool:
 
 
 def agent_card(ctx: Context) -> dict[str, Any] | None:
-    """Card the deployed engine serves; None before the engine exists or while an operation is pending."""
+    """Card the deployed agent serves; None before it exists or while an operation is pending.
+
+    A Cloud Run deployment records its card URL in the `service` state; an engine's is derived from its name.
+    """
+    if not is_a2a(ctx):
+        return None
+    if card_url := (ctx.state.resources.get("service") or {}).get("cardUrl"):
+        return ctx.clients.a2a_card(card_url)
     engine = ctx.state.resources.get("engine") or {}
-    if not engine.get("name") or engine.get("pending") or not is_a2a(ctx):
+    if not engine.get("name") or engine.get("pending"):
         return None
     region = ctx.project.config.provider.region
     return ctx.clients.a2a_card(engine_spec.a2a_card_url(region, engine["name"], ctx.project.agent_directory))
@@ -1101,8 +1119,8 @@ class GeminiEnterpriseResource(Resource):
         ge = ctx.project.config.publish.gemini_enterprise
         if ge is None:
             return
-        engine = (ctx.state.resources.get("engine") or {}).get("name")
-        if not engine:
+        engine = (ctx.state.resources.get("engine") or {}).get("name") or ""
+        if not engine and ge.registration == "adk":
             raise RuntimeError("cannot publish to Gemini Enterprise: engine has no name yet")
         if ge.agent_gateway and ctx.clients.ge_app_gateway(ge.app) is None:
             ctx.clients.ge_set_app_gateway(ge.app, ge.agent_gateway)

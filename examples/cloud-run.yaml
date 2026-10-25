@@ -1,0 +1,58 @@
+# yaml-language-server: $schema=../schema/agent.schema.json
+# An agent deployed as a Cloud Run service. Callers always need roles/run.invoker: the service is never public.
+service: support-agent
+
+provider:
+  name: cloud-run
+  stage: ${opt:stage, 'dev'}
+  project: ${param:project}
+  region: europe-west1
+  stagingBucket: acme-agentless-${stage}   # holds state and the uploaded source Cloud Build reads
+  labels: { team: support, env: "${stage}" }
+  deployer:
+    impersonate: ${param:deployer}         # also mints the ID token used to read the agent card
+
+stages:
+  dev:
+    params: { project: acme-agents-dev, deployer: sa-deployer@acme-agents-dev.iam.gserviceaccount.com }
+  prod:
+    params: { project: acme-agents-prod, deployer: sa-deployer@acme-agents-prod.iam.gserviceaccount.com }
+
+cloudRun:
+  # image: europe-west1-docker.pkg.dev/acme-ci/agents/support-agent:1.4.0   # prebuilt in CI: no source build
+  artifactRegistry: cloud-run-source-deploy   # Docker repository in provider.region; must already exist
+  ingress: internal                        # network restriction on top of IAM, never instead of it
+  # iap: true                              # Identity-Aware Proxy in front of the service (beta)
+  vpcEgress: { network: acme-vpc, subnetwork: agents-europe-west1, egress: private-ranges-only }
+  timeout: 600s
+  cpuThrottling: false
+  sessionAffinity: true
+
+agent:
+  description: Answers internal support questions
+  runtime: { cpu: "1", memory: 4Gi, minInstances: 0, maxInstances: 10, concurrency: 8 }
+  environment:
+    TICKETS_API: https://tickets.internal.example.com
+  secrets:
+    TICKETS_TOKEN: { secret: tickets-api-token }
+
+identity:
+  type: serviceAccount                     # the only identity type on Cloud Run
+  serviceAccount: { name: "sa-support-${stage}" }
+  roles:
+    project: [roles/aiplatform.user]
+
+access:
+  invokers:                                # granted roles/run.invoker on the service; allUsers is rejected
+    - group:support-tools@acme.example.com
+    - serviceAccount:ticket-bot@acme-tools.iam.gserviceaccount.com
+
+memory:
+  sessions: agentPlatform                  # creates a companion engine (no code) for sessions; inMemory skips it
+  memoryBank: { generationModel: gemini-2.5-flash, embeddingModel: text-embedding-005 }
+
+publish:
+  geminiEnterprise:
+    app: projects/123456789/locations/global/collections/default_collection/engines/support-app
+    # registration is a2a on Cloud Run; the app's service agent gets roles/run.invoker
+  agentRegistry: {}

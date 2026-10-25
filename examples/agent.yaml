@@ -4,7 +4,7 @@ service: support-agent                    # lowercase, unique per project; state
 frameworkVersion: "1"
 
 provider:
-  name: agent-runtime                     # only target in v1
+  name: agent-runtime                     # or cloud-run (see examples/cloud-run.yaml)
   stage: ${opt:stage, 'dev'}              # `--stage` always wins
   project: ${param:project}
   region: europe-west1                    # regional; 'global' is rejected

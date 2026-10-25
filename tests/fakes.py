@@ -27,6 +27,10 @@ class FakeGcp:
         self.buckets: dict[str, dict[str, Any]] = {}
         self.bucket_objects: dict[str, int] = defaultdict(int)
         self.absent_buckets: set[str] = set()  # IAM targets that do not exist (others are assumed to)
+        self.run_services: dict[str, dict[str, Any]] = {}
+        self.ar_repositories: set[str] = {"cloud-run-source-deploy"}
+        self.ar_images: dict[str, str] = {}  # image:tag -> digest
+        self.uploads: dict[tuple[str, str], int] = {}  # (bucket, object) -> size
         self.ops_done_immediately = True
         self._ids = itertools.count(1)
 
@@ -57,6 +61,8 @@ class FakeGcp:
             return None
         if rtype == "reasoningEngine" and (name not in self.engines or self._creating(name)):
             return None  # an engine still being created has no policy yet
+        if rtype == "runService" and name not in self.run_services:
+            return None
         return {r: set(m) for r, m in self.policies[(rtype, name)].items()}
 
     def iam_modify(self, rtype: str, name: str, add: Any, remove: Any) -> None:
@@ -65,6 +71,8 @@ class FakeGcp:
             raise RuntimeError(f"404 bucket {name} not found")
         if rtype == "reasoningEngine" and (name not in self.engines or self._creating(name)):
             raise RuntimeError(f"404 reasoning engine {name} not found")
+        if rtype == "runService" and name not in self.run_services:
+            raise RuntimeError(f"404 Cloud Run service {name} not found")
         for _, member in add:
             if member.startswith(("principal://", "principalSet://")) and ".system.id.goog/" not in member:
                 raise RuntimeError(f"400 The member {member} is of an unknown type")
@@ -192,8 +200,69 @@ class FakeGcp:
         self.engines.pop(name, None)
         self.policies.pop(("reasoningEngine", name), None)  # the engine's IAM policy goes with it
 
+    # Cloud Run services
+    def run_service_get(self, name: str) -> dict[str, Any] | None:
+        service = self.run_services.get(name)
+        return None if service is None else json.loads(json.dumps(service))
+
+    def run_service_create(self, name: str, body: dict[str, Any]) -> dict[str, Any]:
+        if name in self.run_services:
+            raise RuntimeError(f"409 service {name} already exists")
+        image = body["template"]["containers"][0]["image"]
+        if ":" not in image.rsplit("/", 1)[-1] and "@" not in image:
+            raise RuntimeError(f"400 image {image} has no tag or digest")
+        service_id, region = name.rsplit("/", 1)[-1], name.split("/")[3]
+        self.calls.append(("run_create", name, body))
+        self.run_services[name] = {**json.loads(json.dumps(body)), "uri": f"https://{service_id}-xyz.{region}.run.app"}
+        return self.run_service_get(name) or {}
+
+    def run_service_update(self, name: str, body: dict[str, Any]) -> dict[str, Any]:
+        if name not in self.run_services:
+            raise RuntimeError(f"404 service {name} not found")
+        self.calls.append(("run_update", name, body))
+        uri = self.run_services[name]["uri"]
+        self.run_services[name] = {**json.loads(json.dumps(body)), "uri": uri}
+        return self.run_service_get(name) or {}
+
+    def run_service_delete(self, name: str) -> None:
+        self.calls.append(("run_delete", name))
+        self.run_services.pop(name, None)
+        self.policies.pop(("runService", name), None)
+
+    # Artifact Registry / Cloud Build
+    def ar_repository_exists(self, repository: str) -> bool:
+        return repository in self.ar_repositories
+
+    def ar_image_digest(self, image: str) -> str | None:
+        return self.ar_images.get(image)
+
+    def upload_source(self, bucket: str, name: str, archive: Path) -> None:
+        self.calls.append(("upload", bucket, name))
+        self.uploads[(bucket, name)] = archive.stat().st_size
+
+    def delete_objects(self, bucket: str, prefix: str) -> None:
+        self.calls.append(("delete_objects", bucket, prefix))
+        for key in [k for k in self.uploads if k[0] == bucket and k[1].startswith(prefix)]:
+            self.uploads.pop(key)
+
+    def cloud_build(
+        self, source: str, image: str, build_args: dict[str, str], service_account: str | None, tags: list[str]
+    ) -> str:
+        bucket, _, obj = source.removeprefix("gs://").partition("/")
+        if (bucket, obj) not in self.uploads:
+            raise RuntimeError(f"404 build source {source} not found")
+        repository = image.split("/")[2]
+        if repository not in self.ar_repositories:
+            raise RuntimeError(f"404 repository {repository} not found")
+        digest = f"sha256:{next(self._ids):064d}"
+        self.calls.append(("build", image, dict(build_args)))
+        self.ar_images[image] = digest
+        return digest
+
     # A2A card served by an engine (url = the engine's A2A endpoint, as agents-cli's A2A app does)
     def a2a_card(self, url: str) -> dict[str, Any] | None:
+        if ".run.app/" in url:
+            return self._run_card(url)
         engine = url.split("/reasoningEngines/v1/", 1)[1].split("/api/", 1)[0]
         if engine not in self.engines:
             return None
@@ -201,6 +270,17 @@ class FakeGcp:
         base = url.removesuffix("/.well-known/agent-card.json")
         version = self.engines[engine].get("card_version", 1)
         return {"name": "sample-agent", "description": f"card v{version}", "url": base, "version": str(version)}
+
+    def _run_card(self, url: str) -> dict[str, Any] | None:
+        host = url.split("/")[2]
+        service_id = host.split(".")[0].rsplit("-", 1)[0]
+        service = next((s for n, s in self.run_services.items() if n.endswith(f"/services/{service_id}")), None)
+        if service is None:
+            return None
+        self.calls.append(("a2a_card", url))
+        image = service["template"]["containers"][0]["image"]
+        base = url.removesuffix("/.well-known/agent-card.json")
+        return {"name": "sample-agent", "description": f"image {image}", "url": base, "version": image}
 
     # Gemini Enterprise
     @staticmethod

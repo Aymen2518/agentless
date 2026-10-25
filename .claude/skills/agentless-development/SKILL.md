@@ -24,7 +24,10 @@ safely.
    override: a flag would make the next deploy without it revert the change. Per-run control goes through `${param:}`.
    Buckets hold user data: never replace one and never delete objects. Releasing one means retain, or delete only
    when it's empty.
-3. **Order matters:** `serviceAccount → agentIdentity → buckets → iam → engine → geminiEnterprise` (`ALL_RESOURCES`). Deletions
+3. **Order matters:** each target's `ALL_RESOURCES` is its dependency order. Agent Runtime:
+   `serviceAccount → agentIdentity → buckets → iam → engine → access → evaluation → agentRegistry →
+   geminiEnterprise`. Cloud Run: `serviceAccount → buckets → iam → sessionEngine → build → service → access →
+   agentRegistry → geminiEnterprise`. Deletions
    that must wait (an old SA, an old GE registration, a superseded engine) go in `change.data["cleanup"]` or
    `state["previous"]` and run in `cleanup()` in reverse order, after every apply. A SA is never deleted while it
    still has bindings.
@@ -32,7 +35,7 @@ safely.
    principal or engine name may only exist mid-run (Agent Identity), so apply can't rely on plan-time values.
    Cross-resource follow-ups use `ctx.reapply.add("<key>")`. The provider re-applies those after the forward pass
    (for example `iam` when the principal changes, `geminiEnterprise` when the engine is recreated).
-5. **Deploy and remove hold the lock across plan and apply** (`AgentRuntimeProvider.deploy` / `remove`). `plan`
+5. **Deploy and remove hold the lock across plan and apply** (`BaseProvider.deploy` / `remove`). `plan`
    alone is read-only and takes no lock.
 6. **Secrets never reach output or state.** Values resolved through `${secret:}` are collected in
    `Project.sensitive`. `spec.redact()` hashes them in stored specs and plan diffs. The GE OAuth secret is only ever
@@ -44,7 +47,11 @@ safely.
 9. **Every GCP call lives in `providers/<target>/clients.py`** and has a twin in `tests/fakes.py`. Resources never
    import Google SDKs. Every SDK client gets `credentials=` from the project's `Deployer` (`agentless/auth.py`), so
    impersonation covers it; a guard test fails otherwise.
-10. **Engine updates are minimal.** Config fields go out with an `update_mask` built by `spec.api_payload`. Code
+10. **Agents are never public.** No target may grant or tolerate `allUsers` / `allAuthenticatedUsers` as callers,
+    and there is no `allowUnauthenticated` switch. Cloud Run services always go out with `invokerIamDisabled: false`;
+    `InvokerResource` blocks on a public grant made outside agentless (it never revokes it, see invariant 2).
+    agentless's own calls to a service use an ID token and never fall back to anonymous requests.
+11. **Engine updates are minimal.** Config fields go out with an `update_mask` built by `spec.api_payload`. Code
     (`source_code_spec`) is only sent when the source hash or the build args change. Fields fixed at creation
     (`IMMUTABLE_FIELDS`) force a blocked REPLACE unless `--allow-replace`. On a never-deployed engine (bare or
     adopted, `spec is None`) they're sent with the first update.
@@ -57,7 +64,7 @@ safely.
 | new resource | subclass `plan.model.Resource` in `resources.py`, insert it into `ALL_RESOURCES`, add client methods and fakes |
 | new variable source | `config/sources.py::build_sources` (or the plugin hook `agentless_variable_sources`) |
 | new CLI command/flag | `cli.py` (wrap with `@handle_errors`; offline commands must not touch `provider.clients`) |
-| new target (Cloud Run…) | `providers/<target>/`, widen `Provider.name`, dispatch in `cli._provider`. See `references/cloud-run-target.md` |
+| new target | `providers/<target>/` with a `BaseProvider` subclass (`resource_types`, `code_resources`, `make_clients`, `_info`, `_write_metadata`) and a `GcpClients` subclass; widen `Provider.name`, reject unsupported settings in `AgentConfig._target`, dispatch in `cli._provider`. `providers/cloud_run/` is the worked example |
 
 ## Testing
 
@@ -94,4 +101,4 @@ the landing page's version badge too.
 
 - `references/gotchas.md`: things that already broke once.
 - `references/sdk-api-notes.md`: the request shapes, update masks and endpoints that were verified.
-- `references/cloud-run-target.md`: the paused Cloud Run design (research done, decisions open).
+- `references/cloud-run-target.md`: the Cloud Run target: decisions taken, container contract, what's unverified live.

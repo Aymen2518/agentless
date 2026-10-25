@@ -131,21 +131,7 @@ class GcpClients:
             policy = self._engine_policy(engine)
             if policy is None:
                 raise RuntimeError(f"404 reasoning engine {engine} not found")
-            bindings: list[dict[str, Any]] = policy.setdefault("bindings", [])
-            for role, member in add:
-                binding = next((b for b in bindings if b["role"] == role and not b.get("condition")), None)
-                if binding is None:
-                    binding: dict[str, Any] = {"role": role, "members": []}
-                    bindings.append(binding)
-                members: list[str] = binding.setdefault("members", [])
-                if member not in members:
-                    members.append(member)
-            for role, member in remove:
-                for b in bindings:
-                    if b["role"] == role and not b.get("condition") and member in b.get("members", []):
-                        b["members"].remove(member)
-            policy["bindings"] = [b for b in bindings if b.get("members")]
-            policy["version"] = 3
+            merge_policy(policy, add, remove)
             response = self._http.post(url, json={"policy": policy}, timeout=60)
             if response.ok:
                 return
@@ -587,6 +573,25 @@ _GE_AGENT_FIELDS = (
     ("authorization_config", "authorization_config"),
     ("sharing_config", "sharing_config"),
 )
+
+
+def merge_policy(policy: dict[str, Any], add: Iterable[Binding], remove: Iterable[Binding]) -> None:
+    """Add and remove unconditional bindings in a REST (JSON) IAM policy, in place."""
+    bindings: list[dict[str, Any]] = policy.setdefault("bindings", [])
+    for role, member in add:
+        found = next((b for b in bindings if b["role"] == role and not b.get("condition")), None)
+        binding: dict[str, Any] = found if found is not None else {"role": role, "members": []}
+        if found is None:
+            bindings.append(binding)
+        members: list[str] = binding.setdefault("members", [])
+        if member not in members:
+            members.append(member)
+    for role, member in remove:
+        for b in bindings:
+            if b["role"] == role and not b.get("condition") and member in b.get("members", []):
+                b["members"].remove(member)
+    policy["bindings"] = [b for b in bindings if b.get("members")]
+    policy["version"] = 3
 
 
 def ge_agent_mask(payload: dict[str, Any]) -> list[str]:

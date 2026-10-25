@@ -1,67 +1,83 @@
-# Cloud Run target: paused design notes (2026-10-04)
+# Cloud Run target (implemented 2026-10-25)
 
-Status: the research is done. The user paused before choosing an approach, so **ask about these decisions before
-building**.
+Code: `src/agentless/providers/cloud_run/`. Tests: `tests/unit/test_cloud_run.py` against `FakeGcp`.
+User docs: README "Cloud Run target", `examples/cloud-run.yaml`.
 
-## Open decisions
-1. **How to build and ship the container:**
-   - **A (recommended):** the Cloud Build API (upload the source tarball to the staging bucket, build, push to
-     Artifact Registry), then the Cloud Run Admin API (`run_v2`) to create or update the service. Also allow an
-     `image:` field for images built in CI (kaniko via `cicd-catalog/cloud-run/docker/build@1`). No gcloud
-     dependency, and it fits the plan/diff/state model.
-   - **B:** shell out to `gcloud run deploy --source .`, like agents-cli does. Least code, but
-     needs gcloud, and diffs are coarse.
-   - **C:** pre-built images only.
-2. **Sessions and Memory Bank on Cloud Run:** should agentless create a companion bare Agent Engine (no code) when
-   `memory` is configured, and inject `SESSION_SERVICE_URI=agentengine://<engine>`? The alternative is in-memory
-   sessions, or a URI the user supplies.
+## Decisions taken
+1. **Build and ship:** agentless builds the image itself with Cloud Build. The packaged source goes to
+   `gs://<stagingBucket>/agentless/<svc>/<stage>/source/<tag>.tar.gz`, Cloud Build runs `docker build` and pushes to
+   `<region>-docker.pkg.dev/<project>/<cloudRun.artifactRegistry>/<service>:<tag>`, and the service runs that image
+   pinned by digest.
+   - `<tag>` hashes the source and the build args, so an existing tag is reused instead of rebuilt.
+   - `cloudRun.image` (built in CI) skips the build.
+   - Everything goes over REST through `GcpClients._rest`; there is no gcloud and no extra SDK dependency.
+2. **Sessions and Memory Bank:** `SessionEngineResource` creates a bare engine (no code) named
+   `<display_name>-sessions`, with the Memory Bank `context_spec`.
+   - It exists when `memory.sessions: agentPlatform` (the default) or `memoryBank` is set.
+   - The service gets `GOOGLE_CLOUD_AGENT_ENGINE_ID` (the numeric id) and `GOOGLE_CLOUD_AGENT_ENGINE_LOCATION`.
+   - The runtime SA gets `roles/aiplatform.user` automatically.
+   - Releasing it: the service drops the env var first, and the engine is deleted in `cleanup`.
+3. **Never public:** the user decided that callers always go through IAM, internal-only services included.
+   - There is no `allowUnauthenticated`, and `allUsers` / `allAuthenticatedUsers` are rejected in `access.invokers`.
+   - Services are always sent with `invokerIamDisabled: false`; a check disabled outside agentless is turned back on.
+   - A public grant made outside agentless blocks plan and deploy.
+   - `ingress: internal` adds to IAM, never replaces it.
+4. **v1 scope:** invokers, GE (A2A only), Agent Registry, Direct VPC egress, ingress, IAP.
 
-## What agents-cli does (`deploy/cmd_deploy.py`, around lines 646–757)
-- **Command:** `gcloud run deploy <svc> --source .` (or `--image`), with `--no-allow-unauthenticated`,
-  `--no-cpu-throttling` and `--labels created-by=adk`.
-- **Sizing defaults on create:** `--memory 4Gi --cpu 1 --min-instances 1 --max-instances 10 --concurrency 8`.
-- **Optional flags:** `--port`, `--iap`, `--service-account`, `--async`.
-- **Env vars:** `.env` plus overrides, `AGENT_VERSION`, `ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS=false`, and
-  `APP_URL=https://{svc}-{projectNumber}.{region}.run.app`.
-- **Secrets:** `--update-secrets ENV=SECRET:VER`.
-- **Not supported:** no ingress, VPC or timeout flags. It writes nothing to `deployment_metadata.json`.
-- **Create vs update:** a GET on `https://{region}-run.googleapis.com/v2/projects/{p}/locations/{r}/services/{svc}`;
-  a 404 means create.
+## Resource notes
+- **`ServiceResource`:**
+  - Its spec (`cloud_run/spec.desired_spec`) is a flat dict like the engine spec, so `spec.diff`, `describe` and
+    `redact` work unchanged.
+  - The image is tracked separately: `state.service.build` holds the build tag, or `state.service.image` for a
+    prebuilt image.
+  - `--code-only` GETs the live service and swaps only the container image, because the stored spec is redacted
+    and can't be re-sent.
+  - Adoption requires the `agentless-service` / `agentless-stage` labels; otherwise it blocks.
+- **`InvokerResource`** is `AccessResource` with `rtype = "runService"`, `noun = "service"` and the role fixed to
+  `roles/run.invoker`.
+- **Agent card:** `agent_card(ctx)` reads `state.service.cardUrl`
+  (`<url>/a2a/<agent_directory>/.well-known/agent-card.json`), so `AgentRegistryResource` and
+  `GeminiEnterpriseResource` are reused unchanged.
+- **`APP_URL`** is `https://<svc>-<projectNumber>.<region>.run.app`. It's deterministic, so it's known before
+  creation and there is no second update like on Agent Runtime.
+- **ID tokens** (`cloud_run/clients.id_token_session`):
+  - An impersonated deployer uses `IDTokenCredentials`.
+  - SA keys use `with_target_audience`.
+  - Otherwise the metadata server is used.
+  - User ADC sends the `id_token` its refresh returns. Cloud Run accepts it for user accounts holding `run.invoker`
+    (verified live), like `gcloud auth print-identity-token`. The metadata server is the last resort.
+  - `roles/run.admin` includes `run.routes.invoke`, so the deployer can read the card without an extra grant.
 
-## Container contract (scaffold)
-- Port 8080, run with `uv run uvicorn app.fast_api_app:app --host 0.0.0.0 --port 8080`.
-- A2A is served at `/a2a/<app>`, with the card at `/a2a/<app>/.well-known/agent-card.json`. The card URL comes
-  from `APP_URL`.
-- **Sessions:** `SESSION_SERVICE_URI`, then `GOOGLE_CLOUD_AGENT_ENGINE_ID` (with `GOOGLE_CLOUD_PROJECT` and
+## Container contract (agents-cli Cloud Run scaffold)
+- Port 8080: `uv run uvicorn app.fast_api_app:app --host 0.0.0.0 --port 8080`.
+- A2A is served at `/a2a/<app>`, with the card at `/a2a/<app>/.well-known/agent-card.json`; the card URL comes from
+  `APP_URL`.
+- ADK routes: `POST /apps/<app>/users/<user>/sessions`, then `POST /run_sse` (what `agentless invoke` calls).
+- Sessions: `SESSION_SERVICE_URI`, then `GOOGLE_CLOUD_AGENT_ENGINE_ID` (+ `GOOGLE_CLOUD_PROJECT`,
   `GOOGLE_CLOUD_AGENT_ENGINE_LOCATION`), otherwise in-memory.
-- **Artifacts:** `LOGS_BUCKET_NAME`.
-- **The Cloud Run Terraform scaffold** also sets the `OTEL_*` env vars, `session_affinity = true`, and SA roles
-  `aiplatform.user`, `logging.logWriter`, `cloudtrace.agent`, `storage.admin` and `serviceusage.serviceUsageConsumer`.
-
-## Gemini Enterprise and callers
-- **Cloud Run means A2A registration only:** `a2aAgentDefinition.jsonAgentCard`, matched on the card's `url`. The
-  card is fetched with an ID token (audience = URL origin).
-- **`run.invoker`:** GE (its service agent) and any other caller need `run.invoker` on the service. Neither
-  agents-cli nor its Terraform grants it, so agentless should (for example a `cloudRun.invokers:` list).
-- **`agents-cli run --url` against Cloud Run** uses an ID token from IAM `generateIdToken` or
-  `gcloud auth print-identity-token`.
-
-## Public webhook services
-- Some agents are called by systems that can't present a Google identity, such as a Git hosting webhook. They have
-  to be public (`--allow-unauthenticated`), and the auth boundary becomes an app-level shared secret (for example
-  a webhook token header). So agentless must support `allowUnauthenticated: true`.
 - Serve health checks on `/health` or `/`, not `/healthz`, which Cloud Run reserves.
-- A `.gcloudignore` keeps tests and reports out of the source upload.
-- CI often builds the image with kaniko or Cloud Build and pushes it to Artifact Registry. That's the case an
-  `image:` field covers.
+- The manifest must say `deployment_target: cloud_run`; the loader rejects a mismatch with `provider.name`.
 
-## Suggested shape (if option A is chosen)
-- `provider.name: cloud-run`, plus a `cloudRun:` block:
-  - `ingress` (`all`, `internal`, `internal-and-cloud-load-balancing`)
-  - `allowUnauthenticated`, `invokers: [members]`, `iap`
-  - `vpcEgress` (Direct VPC: network/subnet, egress)
-  - `timeout`, `cpuThrottling`, `sessionAffinity`, `port`, `artifactRegistry` (repo), `image` (skip the build)
-- Resources: `serviceAccount → iam → [build] → service → invokerIam → [companion engine] → geminiEnterprise
-  (A2A)`. Reuse `ServiceAccountResource` and `IamResource` unchanged.
-- Fields fixed at creation: none for Cloud Run (it creates revisions). Diff the service template the same way
-  `spec.py` does, and write the service URL to state and to `deployment_metadata.json` (new key `service_url`).
+## Not supported yet (validation or the CLI rejects them)
+`eval`, `evaluation.afterDeploy`, `evaluation.monitors`, `deploy --no-wait` / `--status`, PSC-I, `serverMode`,
+`identity.type` other than `serviceAccount`, `access.role`, and GE `registration: adk`.
+
+## Verified live (2026-10-25, a dummy agent in a sandbox project)
+- `plan` reads: the service GET (404 → create), the Artifact Registry repository and tag GETs, the engine lookup, IAM.
+- The Cloud Run Admin v2 create (`services?serviceId=`), the PATCH update with the whole body, LRO polling,
+  `getIamPolicy` as a GET, `setIamPolicy`, and the delete.
+- Cloud Build regional builds: the digest is read from `results.images[].digest`. **Poll the build
+  (`projects/<p>/locations/<r>/builds/<id>`), not the returned operation:** a regional build's operation name 404s on
+  `/v1/operations/...`.
+- An Artifact Registry tag that already exists is reused without rebuilding (after a deploy failed mid-build).
+- **APIs just enabled:** a build created minutes after enabling `cloudbuild.googleapis.com` failed with a 403
+  ("The caller does not have permission"); the rerun a few minutes later worked.
+- The session engine works: ADK sessions persisted across `invoke` calls. Remove deletes the service, the engine,
+  the SA, its project bindings and the uploaded sources.
+- An anonymous request to the service returns 403.
+
+## Not verified against live APIs
+- Direct IAP (`iapEnabled` plus `launchStage: BETA`), Direct VPC egress, and `--code-only` (output-only fields left in
+  the body).
+- Gemini Enterprise A2A registration of a Cloud Run card URL, the Agent Registry, and GE's service agent calling the
+  service with `run.invoker`.

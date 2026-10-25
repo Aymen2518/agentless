@@ -171,15 +171,19 @@ def _given(value: str) -> bool:
 def _check_agents_cli_project(config: AgentConfig, source_dir: Path, manifest: Manifest | None) -> None:
     if not source_dir.is_dir():
         raise ConfigError(f"agent.source.path: {source_dir} does not exist")
-    if manifest and manifest.deployment_target not in (None, "agent_runtime"):
+    target = config.provider.name.replace("-", "_")  # agents-cli spells targets agent_runtime / cloud_run
+    if manifest and manifest.deployment_target not in (None, target):
         raise ConfigError(
-            f"agents-cli project targets {manifest.deployment_target!r}; agentless v1 deploys to agent_runtime only"
+            f"agents-cli project targets {manifest.deployment_target!r} but provider.name is "
+            f"{config.provider.name!r}; scaffold the matching server first "
+            f"(agents-cli scaffold enhance --deployment-target {target})"
         )
     agent_dir = config.agent.source.agent_directory or (manifest.agent_directory if manifest else "app")
     if not (source_dir / agent_dir).is_dir():
         raise ConfigError(f"agent directory {source_dir / agent_dir} not found")
-    if not (source_dir / "Dockerfile").is_file():
-        raise ConfigError(f"{source_dir}/Dockerfile not found: Agent Runtime builds the agent from a Dockerfile")
+    prebuilt = config.cloud_run is not None and config.cloud_run.image
+    if not prebuilt and not (source_dir / "Dockerfile").is_file():
+        raise ConfigError(f"{source_dir}/Dockerfile not found: agentless builds the agent from a Dockerfile")
 
 
 def format_validation_error(error: ValidationError) -> str:

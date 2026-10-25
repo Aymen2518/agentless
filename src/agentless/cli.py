@@ -1,4 +1,4 @@
-"""`agentless` command line: the Serverless-style lifecycle for Agent Runtime agents."""
+"""`agentless` command line: the Serverless-style lifecycle for agents on Agent Runtime or Cloud Run."""
 
 from __future__ import annotations
 
@@ -24,6 +24,9 @@ from agentless.plan.model import Action, ChangeSet, DeployOptions
 from agentless.plan.render import render
 from agentless.providers.agent_runtime import evals, ops
 from agentless.providers.agent_runtime.provider import AgentRuntimeProvider, DeployError
+from agentless.providers.base import BaseProvider
+from agentless.providers.cloud_run import ops as run_ops
+from agentless.providers.cloud_run.provider import CloudRunProvider
 from agentless.state.store import StateError
 
 app = typer.Typer(
@@ -111,8 +114,22 @@ def _load(
     return project, pm
 
 
-def _provider(project: Project, pm: Any) -> AgentRuntimeProvider:
+def _provider(project: Project, pm: Any) -> BaseProvider:
+    if _on_cloud_run(project):
+        return CloudRunProvider(project, hooks=pm, echo=typer.echo)
     return AgentRuntimeProvider(project, hooks=pm, echo=typer.echo)
+
+
+def _on_cloud_run(project: Project) -> bool:
+    return project.config.provider.name == "cloud-run"
+
+
+def _service_name(provider: BaseProvider) -> str:
+    """Deployed Cloud Run service; raises when nothing is deployed."""
+    name = provider.info().get("cloudRunService")
+    if not name:
+        raise DeployError("nothing deployed for this stage yet")
+    return name
 
 
 def _header(project: Project, verb: str) -> None:
@@ -287,6 +304,8 @@ def deploy(
 ) -> None:
     """Reconcile GCP with agent.yaml: identity, IAM, engine, memory, networking, Gemini Enterprise."""
     project, pm = _load(config, stage, param, impersonate)
+    if _on_cloud_run(project) and (no_wait or status):
+        raise ConfigError("--no-wait and --status are not supported on cloud-run yet: a deploy waits for the revision")
     provider = _provider(project, pm)
     if status:
         if provider.status():
@@ -312,13 +331,15 @@ def deploy(
 
 def _evaluate(
     project: Project,
-    provider: AgentRuntimeProvider,
+    provider: BaseProvider,
     dataset: Path | None,
     overrides: dict[str, float | None],
     output: Path | None,
     as_json: bool = False,
 ) -> bool:
     """Run the evaluation against the stage's engine, print and save the results; False when a threshold fails."""
+    if _on_cloud_run(project):
+        raise ConfigError("`eval` is not supported on cloud-run yet (it evaluates a reasoning engine)")
     cfg, ev = project.config, project.config.evaluation
     path = dataset or (project.config_path.parent / ev.dataset if ev.dataset else None)
     if path is None:
@@ -417,7 +438,7 @@ def _window(since: str) -> datetime.timedelta:
     return datetime.timedelta(**{UNITS[match[2]]: int(match[1])})
 
 
-def _engine_name(provider: AgentRuntimeProvider) -> str:
+def _engine_name(provider: BaseProvider) -> str:
     name = provider.info().get("engine")
     if not name:
         raise DeployError("nothing deployed for this stage yet")
@@ -435,12 +456,26 @@ def logs(
     tail: Annotated[bool, typer.Option("--tail", "-t", help="Keep following new entries.")] = False,
     impersonate: ImpersonateOpt = None,
 ) -> None:
-    """Print the engine's Cloud Logging entries."""
+    """Print the agent's Cloud Logging entries."""
     project, pm = _load(config, stage, param, impersonate)
     window = _window(since)
+    provider = _provider(project, pm)
+    if _on_cloud_run(project):
+        service = _service_name(provider)
+        ops.read_logs(
+            project.config.provider.project,
+            service,
+            since=window,
+            severity=severity,
+            tail=tail,
+            echo=typer.echo,
+            credentials=project.deployer.credentials(),
+            make_filter=lambda start, sev: run_ops.log_filter(service, start, sev),
+        )
+        return
     ops.read_logs(
         project.config.provider.project,
-        _engine_name(_provider(project, pm)),
+        _engine_name(provider),
         since=window,
         severity=severity,
         tail=tail,
@@ -461,12 +496,21 @@ def metrics(
 ) -> None:
     """Request count, error rate and latency of the deployed agent (Cloud Monitoring, read-only)."""
     project, pm = _load(config, stage, param, impersonate)
-    data = ops.metrics(
-        project.config.provider.project,
-        _engine_name(_provider(project, pm)),
-        since=_window(since),
-        credentials=project.deployer.credentials(),
-    )
+    provider = _provider(project, pm)
+    if _on_cloud_run(project):
+        data = run_ops.metrics(
+            project.config.provider.project,
+            _service_name(provider),
+            since=_window(since),
+            credentials=project.deployer.credentials(),
+        )
+    else:
+        data = ops.metrics(
+            project.config.provider.project,
+            _engine_name(provider),
+            since=_window(since),
+            credentials=project.deployer.credentials(),
+        )
     if as_json:
         typer.echo(json.dumps(data, indent=2))
         return
@@ -503,7 +547,11 @@ def open_(
         raise ConfigError(f"unknown target {target!r}; choose one of: {', '.join(ops.CONSOLE_TARGETS)}")
     project, pm = _load(config, stage, param, impersonate)
     cfg = project.config.provider
-    url = ops.console_links(cfg.project, cfg.region, _engine_name(_provider(project, pm)))[target]
+    provider = _provider(project, pm)
+    if _on_cloud_run(project):
+        url = run_ops.console_links(cfg.project, cfg.region, _service_name(provider))[target]
+    else:
+        url = ops.console_links(cfg.project, cfg.region, _engine_name(provider))[target]
     typer.echo(url)
     if not print_only:
         typer.launch(url)
@@ -524,19 +572,34 @@ def invoke(
     """Send a message to the deployed agent and stream its answer."""
     project, pm = _load(config, stage, param, impersonate)
     cfg = project.config
-    for event in ops.invoke(
-        cfg.provider.region,
-        _engine_name(_provider(project, pm)),
-        message,
-        user_id=user,
-        session_id=session,
-        project=cfg.provider.project,
-        credentials=project.deployer.credentials(),
-    ):
+    provider = _provider(project, pm)
+    if _on_cloud_run(project):
+        _service_name(provider)
+        events = run_ops.invoke(
+            provider.info()["url"],
+            project.agent_directory,
+            message,
+            user_id=user,
+            session_id=session,
+            credentials=project.deployer.credentials(),
+        )
+    else:
+        events = ops.invoke(
+            cfg.provider.region,
+            _engine_name(provider),
+            message,
+            user_id=user,
+            session_id=session,
+            project=cfg.provider.project,
+            credentials=project.deployer.credentials(),
+        )
+    for event in events:
         if "session_id" in event and len(event) == 1:
             typer.secho(f"session {event['session_id']}", dim=True)
         elif raw:
             typer.echo(json.dumps(event))
+        elif "error" in event and "content" not in event:
+            _fail(f"the agent failed: {event['error']}")
         else:
             author, text = ops.event_text(event)
             if text:

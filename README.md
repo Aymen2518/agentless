@@ -1,6 +1,7 @@
 # agentless
 
-Serverless Framework–style deployments for ADK agents on **Google Cloud Agent Platform (Agent Runtime)**.
+Serverless Framework–style deployments for ADK agents on **Google Cloud Agent Platform (Agent Runtime)** or
+**Cloud Run**.
 
 You build the agent with `agents-cli` (scaffold, playground, local eval). You describe *where and how* it runs in one
 `agent.yaml`. Then:
@@ -18,6 +19,7 @@ from the YAML. There are no Terraform files per agent and no long `agents-cli de
 - [Install](#install) and [quick start](#quick-start)
 - [`agent.yaml` reference](#agentyaml)
 - [Commands](#commands), [permissions](#permissions), [plugins](#plugins), [CI/CD](#cicd), [container image](#container-image)
+- [Cloud Run target](#cloud-run-target)
 - [Code layout](#code-layout), [extending agentless](#extending-agentless), [status and roadmap](#status-and-roadmap)
 - [Development and AI skills](#development), [license](#license)
 
@@ -239,6 +241,7 @@ identity:
 | `resources.buckets` | GCS buckets agentless creates, with access for the agent and the name in an env var | Cloud Storage buckets, bucket IAM |
 | `evaluation` | dataset, metrics and thresholds for `agentless eval` and the deploy gate; online monitors on live traffic | Evaluation Service `evaluationRuns` / `onlineEvaluators` |
 | `observability.tracing` | Cloud Trace export (on by default), prompt/response capture (off by default), runtime roles granted automatically | env vars, same as agents-cli; project IAM |
+| `cloudRun` | only with `provider.name: cloud-run`: prebuilt image or Artifact Registry repository, ingress, IAP, Direct VPC egress, timeout, CPU throttling, session affinity, port | Cloud Run service (see [Cloud Run target](#cloud-run-target)) |
 
 ### Buckets
 
@@ -428,7 +431,8 @@ needs prod's environment variables.
 ## What `deploy` does
 
 1. **Load** `agent.yaml`, pick the stage, resolve variables, then validate (pydantic) against the agents-cli
-   manifest. The target must be `agent_runtime` and the project needs a `Dockerfile`.
+   manifest. The manifest's target must match `provider.name` (`agent_runtime` or `cloud_run`) and the project
+   needs a `Dockerfile` (unless a Cloud Run agent uses a prebuilt `cloudRun.image`).
 2. **Package** the files exactly as agents-cli would (`.gcloudignore`, else `.gitignore`; `.venv/`, `venv/`,
    `__pycache__/` and `*.pyc` are always skipped) and take their sha256. Symlinks pointing outside the agent are rejected.
    `agent.yaml` and `deployment_metadata.json` don't count towards the hash. This step is offline.
@@ -470,6 +474,59 @@ needs prod's environment variables.
 - `--no-wait` records the pending operation in state. Run `deploy --status` to finalize it. Any other deploy is
   blocked until you do.
 
+## Cloud Run target
+
+Set `provider.name: cloud-run` to run the agent as a Cloud Run service instead of a reasoning engine. The agents-cli
+project must be scaffolded for Cloud Run (`deployment_target: cloud_run`, the FastAPI server on port 8080).
+[`examples/cloud-run.yaml`](examples/cloud-run.yaml) shows every option.
+
+```yaml
+provider:
+  name: cloud-run
+  project: ${param:project}
+  region: europe-west1
+  stagingBucket: acme-agentless-${stage}   # state, plus the source tarball Cloud Build reads
+cloudRun:
+  ingress: internal
+  vpcEgress: { network: acme-vpc, subnetwork: agents-europe-west1 }
+access:
+  invokers: [group:support-tools@acme.example.com]
+```
+
+**Resources**, applied in this order and destroyed in reverse:
+
+| # | Resource | Owns |
+|---|---|---|
+| 1 | `serviceAccount`, `buckets`, `iam` | same as on Agent Runtime; the runtime identity is always a service account |
+| 2 | `sessionEngine` | a bare reasoning engine (no code) holding sessions and the Memory Bank, when `memory.sessions` is `agentPlatform` (the default) or `memory.memoryBank` is set. The service gets `GOOGLE_CLOUD_AGENT_ENGINE_ID`, and the runtime SA `roles/aiplatform.user`. Use `sessions: inMemory` to skip it |
+| 3 | `build` | the image: the packaged source is uploaded to the staging bucket, built by Cloud Build and pushed to `<region>-docker.pkg.dev/<project>/<cloudRun.artifactRegistry>/<service>:<hash>`. The tag hashes the source and build args, so an image already in the registry is never rebuilt. Skipped when `cloudRun.image` is set (built in CI) |
+| 4 | `service` | the Cloud Run service, `<service>-<stage>` unless `cloudRun.serviceName`. Its config is diffed against the last-applied spec. Each change is a new revision, and the image is pinned by digest. `APP_URL` is the service's `run.app` URL, which is known before creation |
+| 5 | `access` | `roles/run.invoker` on the service for `access.invokers` and the Gemini Enterprise service agent |
+| 6 | `agentRegistry`, `geminiEnterprise` | the agent card served by the service (Gemini Enterprise registration is `a2a` on Cloud Run) |
+
+**Never public.** Every caller needs a Google identity that holds `roles/run.invoker`:
+
+- The service is always deployed with the invoker IAM check on. If someone turns it off, the next deploy turns it
+  back on.
+- `allUsers` and `allAuthenticatedUsers` are rejected in `access.invokers`.
+- If someone grants them on the service outside agentless, `plan` and `deploy` stop until the binding is removed.
+- `cloudRun.ingress: internal` limits where requests can come from, on top of IAM, never instead of it.
+- Callers on GCP get an ID token from the metadata server (`google.oauth2.id_token.fetch_id_token`).
+- agentless's own calls (agent card, `invoke`) always send an ID token: the impersonated deployer's, a service
+  account key's, the metadata server's, or the one your `gcloud auth application-default login` refresh returns.
+  They never fall back to anonymous requests.
+
+**Not supported on Cloud Run yet:** `eval`, `evaluation.afterDeploy`, `evaluation.monitors`, `deploy --no-wait` /
+`--status`, PSC-I (use `cloudRun.vpcEgress`), `agent.runtime.serverMode`, and `identity.type` other than
+`serviceAccount`. Each one fails validation or the command with a clear message.
+
+`logs`, `metrics`, `open` and `invoke` work against the service. `invoke` calls the ADK server's `/run_sse`.
+`deployment_metadata.json` records `service_url` and `deployment_target: cloud_run`.
+
+The Artifact Registry repository belongs to your environment's infrastructure-as-code: the plan stops if it
+doesn't exist. `remove` deletes the service, its invoker bindings, the session engine (with its sessions and
+memories) and the uploaded sources. Built images stay in the registry.
+
 ## Commands
 
 | Command | |
@@ -501,6 +558,8 @@ Without a TTY (CI), `deploy` applies without asking, like `serverless deploy`. W
 |---|---|
 | Deployer (your user, a CI service account via Workload Identity Federation, or the impersonated `provider.deployer`) | `roles/aiplatform.admin`, `roles/iam.serviceAccountAdmin`, `roles/iam.serviceAccountUser`, `roles/resourcemanager.projectIamAdmin`, `roles/storage.objectAdmin` on the state bucket, `roles/secretmanager.admin` (or `setIamPolicy`) on the agent's secrets, `roles/discoveryengine.editor` to publish (`roles/discoveryengine.admin` on the app for `agentGateway`), `roles/agentregistry.editor` for `publish.agentRegistry`, `roles/storage.admin` when `resources.buckets` is used, `roles/monitoring.viewer` for `agentless metrics`, `roles/storage.objectAdmin` on `evaluation.dest` for `agentless eval`. Org-level grants also need org IAM admin. Leave `identity.roles.organization` out until that's approved. |
 | Vertex AI service agents (evaluation) | the Evaluation Service writes results to `evaluation.dest` and calls the engine; grant its service agent `roles/storage.objectAdmin` on that bucket if the run reports a permission error |
+| Deployer, Cloud Run target | instead of `roles/aiplatform.admin`: `roles/run.admin` (also lets agentless read the agent card), `roles/cloudbuild.builds.editor`, `roles/artifactregistry.reader` on the repository, `roles/storage.objectAdmin` on the staging bucket, `roles/iam.serviceAccountUser` on the runtime SA (and on the build SA). Keep `roles/aiplatform.admin` when a session engine is used |
+| Cloud Build service account | `roles/artifactregistry.writer` on the repository, `roles/storage.objectViewer` on the staging bucket, `roles/logging.logWriter` |
 | Caller, when impersonating a deployer | `roles/iam.serviceAccountTokenCreator` on the deployer SA (and on each delegate) |
 | Runtime SA or Agent Identity principal | what `identity.roles` lists, plus automatic grants: secrets, the artifacts bucket, declared buckets, and with tracing on `cloudtrace.agent`, `logging.logWriter`, `monitoring.metricWriter` |
 
@@ -607,12 +666,14 @@ docker run --rm \
 | `src/agentless/plan/model.py` | `Action`, `Change`, `ChangeSet`, `DeployOptions`, `Context`, the `Resource` base class |
 | `src/agentless/plan/render.py` | coloured plan output |
 | `src/agentless/hooks.py` | pluggy hook specs and plugin loading |
-| `src/agentless/providers/agent_runtime/provider.py` | orchestration: plan, deploy (lock → plan → confirm → apply → reapply → cleanup), status, remove, info |
+| `src/agentless/providers/base.py` | target-agnostic orchestration: plan, deploy (lock → plan → confirm → apply → reapply → cleanup), remove, info |
+| `src/agentless/providers/agent_runtime/provider.py` | the Agent Runtime provider: resource list, clients, `--status`, info, metadata |
 | `src/agentless/providers/agent_runtime/resources.py` | the resources above |
 | `src/agentless/providers/agent_runtime/spec.py` | `agent.yaml` → engine spec, diff, update masks, API payloads, secret redaction |
 | `src/agentless/providers/agent_runtime/clients.py` | the only module that calls GCP (Agent Platform SDK, IAM, Resource Manager, Secret Manager, Storage, BigQuery, Discovery Engine REST) |
 | `src/agentless/providers/agent_runtime/ops.py` | `logs`, `metrics`, console links and `invoke` |
 | `src/agentless/providers/agent_runtime/evals.py` | `eval` and the deploy gate: metric names, evaluation runs, thresholds |
+| `src/agentless/providers/cloud_run/` | the Cloud Run target: `provider.py`, `resources.py` (session engine, build, service, invokers), `spec.py` (service body), `clients.py` (Cloud Run Admin v2, Cloud Build, Artifact Registry REST, ID tokens), `ops.py` |
 | `tests/fakes.py` | `FakeGcp`, an in-memory stand-in for `clients.py` used by the provider tests |
 | `examples/`, `schema/` | reference configs, and the JSON Schema generated by `agentless schema` |
 
@@ -630,27 +691,28 @@ docker run --rm \
   3. Insert the class into `ALL_RESOURCES` at the right position in the dependency order.
 - **New variable source:** add it to `build_sources()` in `config/sources.py`, or ship it as a plugin through the
   `agentless_variable_sources` hook.
-- **New target (for example Cloud Run):**
-  1. Create `providers/<target>/` with its own resources and clients. Reuse `ServiceAccountResource` and
-     `IamResource`.
-  2. Widen `Provider.name` in the schema.
+- **New target:**
+  1. Create `providers/<target>/` with a `BaseProvider` subclass, its resources and its clients (subclass
+     `GcpClients` to inherit the shared calls). Reuse `ServiceAccountResource`, `BucketsResource` and
+     `IamResource`. `providers/cloud_run/` is the worked example.
+  2. Widen `Provider.name` in the schema and reject settings the target can't honour in `AgentConfig._target`.
   3. Pick the provider class in `cli._provider`.
-
-  Research notes and open decisions: `.claude/skills/agentless-development/references/cloud-run-target.md`.
 - **Organisation policy:** write a plugin with `agentless_after_load` or `agentless_after_plan` that raises to
   reject a config or plan.
 
 ## Status and roadmap
 
 **Verified:**
-- 149 unit tests: the variable resolver, loader, packager, CLI, and the full provider lifecycle against `FakeGcp`
-  (create, no-op, config-only and code-only updates, replace, adoption, identity switches, partial failures, publish,
+- 245 unit tests: the variable resolver, loader, packager, CLI, and the full provider lifecycle of both targets against
+  `FakeGcp` (create, no-op, config-only and code-only updates, replace, adoption, identity switches, partial failures, publish,
   remove).
 - ruff and ty are clean.
 - Used end to end against real Agent Runtime deployments: create, update, invoke and remove of an agents-cli agent.
 
-**Limits (v1):**
-- Agent Runtime is the only target. Resources sit behind a provider interface, so Cloud Run can be added later.
+**Limits:**
+- The Cloud Run target was deployed live once (create, rebuild, update, invoker grant, `invoke` with Agent Engine
+  sessions, `logs`, `remove`). Direct IAP (beta), Direct VPC egress, `--code-only`, and the Agent Registry and
+  Gemini Enterprise A2A registration of a Cloud Run card haven't been exercised against the live APIs yet.
 - Engine drift is detected against the last-applied spec, not by re-reading every live field. Changes made in the
   Console are overwritten on the next deploy of that field.
 - The engine code path uses the Agent Platform SDK's private `_create_config` / `_create` / `_update` methods, the
@@ -660,7 +722,7 @@ docker run --rm \
   against the live APIs yet.
 
 **Next:**
-1. Cloud Run target (paused; see the notes above).
+1. `eval` and online monitors for Cloud Run agents; live tests of IAP, VPC egress and publishing on Cloud Run.
 2. Reusable CI templates (GitHub Action / GitLab component) wrapping `agentless deploy --stage $ENV`.
 3. GCS state buckets for shared stages, so CI and colleagues see the same deployment.
 4. Optional live drift detection on `plan`.

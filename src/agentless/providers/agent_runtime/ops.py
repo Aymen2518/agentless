@@ -32,8 +32,9 @@ def read_logs(
     tail: bool,
     echo: Callable[[str], None],
     credentials: Any,
+    make_filter: Callable[[datetime.datetime, str | None], str] | None = None,
 ) -> None:
-    """Print engine logs, optionally following new entries."""
+    """Print engine logs (or, with `make_filter`, any resource's), optionally following new entries."""
     from google.cloud import logging as cloud_logging
 
     client = cloud_logging.Client(project=project, credentials=credentials)
@@ -41,7 +42,9 @@ def read_logs(
     seen: set[str] = set()
     while True:
         entries = client.list_entries(
-            filter_=log_filter(engine_name, start, severity), order_by=cloud_logging.ASCENDING, page_size=500
+            filter_=(make_filter or (lambda t, sev: log_filter(engine_name, t, sev)))(start, severity),
+            order_by=cloud_logging.ASCENDING,
+            page_size=500,
         )
         for entry in entries:
             if entry.insert_id in seen:
@@ -124,16 +127,37 @@ def metrics(
     project: str, engine_name: str, *, since: datetime.timedelta, credentials: Any, session: Any = None
 ) -> dict[str, Any]:
     """Request count by response class, 5xx error rate and p50/p95 latency over the window (Cloud Monitoring)."""
+    engine_id = engine_name.rsplit("/", 1)[-1]
+    data = request_metrics(
+        project,
+        _METRIC_PREFIX,
+        f'resource.labels.reasoning_engine_id="{engine_id}"',
+        since=since,
+        credentials=credentials,
+        session=session,
+    )
+    return {"engine": engine_name, **data}
+
+
+def request_metrics(
+    project: str,
+    metric_prefix: str,
+    resource_filter: str,
+    *,
+    since: datetime.timedelta,
+    credentials: Any,
+    session: Any = None,
+) -> dict[str, Any]:
+    """`request_count` by response class and `request_latencies` percentiles of one monitored resource."""
     from google.auth.transport.requests import AuthorizedSession
 
     http = session or AuthorizedSession(credentials)
     end = datetime.datetime.now(tz=datetime.UTC)
     seconds = max(60, int(since.total_seconds()))
-    engine_id = engine_name.rsplit("/", 1)[-1]
 
     def query(metric: str, aligner: str, reducer: str, group_by: str | None = None) -> list[dict[str, Any]]:
         params = {
-            "filter": f'metric.type="{_METRIC_PREFIX}{metric}" AND resource.labels.reasoning_engine_id="{engine_id}"',
+            "filter": f'metric.type="{metric_prefix}{metric}" AND {resource_filter}',
             "interval.startTime": (end - datetime.timedelta(seconds=seconds)).isoformat(),
             "interval.endTime": end.isoformat(),
             "aggregation.alignmentPeriod": f"{seconds}s",
@@ -160,7 +184,6 @@ def metrics(
         latency[f"p{pct}"] = _to_ms(value, series[0].get("unit", "ms")) if value is not None else None
 
     return {
-        "engine": engine_name,
         "window": f"{seconds}s",
         "requests": total,
         "byClass": dict(sorted(by_class.items())),

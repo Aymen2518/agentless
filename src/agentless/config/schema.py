@@ -57,7 +57,10 @@ class DeployerConfig(_Model):
 class Provider(_Model):
     """Where and how the agent is deployed."""
 
-    name: Literal["agent-runtime"] = "agent-runtime"
+    name: Literal["agent-runtime", "cloud-run"] = Field(
+        default="agent-runtime",
+        description="agent-runtime: a reasoning engine on Agent Runtime. cloud-run: a Cloud Run service (see cloudRun).",
+    )
     stage: str = "dev"
     project: str
     region: str
@@ -69,7 +72,7 @@ class Provider(_Model):
     @classmethod
     def _regional(cls, v: str) -> str:
         if v == "global":
-            raise ValueError("Agent Runtime needs a regional location, not 'global'")
+            raise ValueError("agents deploy to a regional location, not 'global'")
         return v
 
     @field_validator("staging_bucket")
@@ -84,6 +87,55 @@ class Provider(_Model):
             if not _LABEL_RE.match(key):
                 raise ValueError(f"invalid label key {key!r}")
         return v
+
+
+class VpcEgress(_Model):
+    """Direct VPC egress of a Cloud Run service."""
+
+    network: str = Field(description="VPC network name or full resource name.")
+    subnetwork: str = Field(description="Subnetwork name or full resource name, in provider.region.")
+    egress: Literal["private-ranges-only", "all-traffic"] = "private-ranges-only"
+
+
+class CloudRun(_Model):
+    """Cloud Run service settings (provider.name: cloud-run); callers always need roles/run.invoker, never public."""
+
+    service_name: str | None = Field(
+        default=None, pattern=r"^[a-z]([a-z0-9-]{0,47}[a-z0-9])?$", description="Defaults to <service>-<stage>."
+    )
+    image: str | None = Field(
+        default=None, description="Prebuilt image (e.g. built in CI). When set, agentless does not build the source."
+    )
+    artifact_registry: str = Field(
+        default="cloud-run-source-deploy",
+        pattern=r"^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$",
+        description="Docker repository in provider.region that receives built images; it must already exist.",
+    )
+    build_service_account: str | None = Field(
+        default=None, description="Service account Cloud Build runs as; defaults to the project's build default."
+    )
+    ingress: Literal["all", "internal", "internal-and-cloud-load-balancing"] = Field(
+        default="all",
+        description="Network sources allowed to reach the service. IAM still applies to every request.",
+    )
+    iap: bool = Field(default=False, description="Put Identity-Aware Proxy in front of the service.")
+    vpc_egress: VpcEgress | None = None
+    timeout: str = Field(default="300s", pattern=r"^\d+s$", description="Request timeout, at most 3600s.")
+    cpu_throttling: bool = Field(default=False, description="Only allocate CPU during requests.")
+    session_affinity: bool = True
+    port: int = Field(default=8080, ge=1, le=65535)
+
+    @field_validator("timeout")
+    @classmethod
+    def _max_timeout(cls, v: str) -> str:
+        if not 1 <= int(v[:-1]) <= 3600:
+            raise ValueError("timeout must be between 1s and 3600s")
+        return v
+
+    @field_validator("build_service_account")
+    @classmethod
+    def _sa(cls, v: str | None) -> str | None:
+        return check_service_account(v) if v else v
 
 
 class Source(_Model):
@@ -442,6 +494,7 @@ class Publish(_Model):
 
 
 _MEMBER_PREFIXES = ("user:", "group:", "serviceAccount:", "domain:", "principal://", "principalSet://")
+_PUBLIC_MEMBERS = ("allUsers", "allAuthenticatedUsers")
 
 
 class Access(_Model):
@@ -467,6 +520,8 @@ class Access(_Model):
     @classmethod
     def _members(cls, v: list[str]) -> list[str]:
         for member in v:
+            if member in _PUBLIC_MEMBERS:
+                raise ValueError(f"{member} cannot invoke an agent: callers must be granted by identity (IAM)")
             if not member.startswith(_MEMBER_PREFIXES):
                 raise ValueError(f"invalid IAM member {member!r} (expected user:, group:, serviceAccount:, …)")
         return v
@@ -556,6 +611,9 @@ class AgentConfig(_Model):
     observability: Observability = Field(default_factory=Observability)
     evaluation: Evaluation = Field(default_factory=Evaluation)
     resources: Resources = Field(default_factory=Resources)
+    cloud_run: CloudRun | None = Field(
+        default=None, description="Cloud Run settings; only with provider.name: cloud-run."
+    )
     custom: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -586,6 +644,50 @@ class AgentConfig(_Model):
                 "and observability.tracing.captureContent to true"
             )
         return self
+
+    @model_validator(mode="after")
+    def _target(self) -> AgentConfig:
+        if self.provider.name != "cloud-run":
+            if self.cloud_run is not None:
+                raise ValueError("cloudRun is only valid with provider.name: cloud-run")
+            return self
+        self.cloud_run = self.cloud_run or CloudRun()
+        ge = self.publish.gemini_enterprise
+        if ge is not None and "registration" not in ge.model_fields_set:
+            ge.registration = "a2a"  # Gemini Enterprise reaches a Cloud Run agent through its A2A card
+        unsupported = [
+            (self.identity.type != IdentityType.SERVICE_ACCOUNT, "identity.type must be serviceAccount"),
+            (self.network.psc_interface is not None, "network.pscInterface: use cloudRun.vpcEgress"),
+            (self.agent.runtime.server_mode is not None, "agent.runtime.serverMode is Agent Runtime only"),
+            (bool(self.evaluation.monitors), "evaluation.monitors are not supported on Cloud Run yet"),
+            (self.evaluation.after_deploy, "evaluation.afterDeploy is not supported on Cloud Run yet"),
+            (ge is not None and ge.registration == "adk", "publish.geminiEnterprise.registration must be a2a"),
+            (
+                "role" in self.access.model_fields_set,
+                "access.role is fixed to roles/run.invoker on Cloud Run; remove it",
+            ),
+            (
+                not self.cloud_run.image and not self.provider.staging_bucket,
+                "building the source needs provider.stagingBucket (or set cloudRun.image)",
+            ),
+        ]
+        problems = [message for failed, message in unsupported if failed]
+        if problems:
+            raise ValueError("provider cloud-run: " + "; ".join(problems))
+        return self
+
+    @property
+    def session_engine(self) -> bool:
+        """Whether a Cloud Run agent needs a companion engine to hold its sessions and Memory Bank."""
+        return self.provider.name == "cloud-run" and (
+            self.memory.sessions == "agentPlatform" or self.memory.memory_bank is not None
+        )
+
+    @property
+    def run_service_name(self) -> str:
+        """Cloud Run service name, unique per service and stage."""
+        name = (self.cloud_run.service_name if self.cloud_run else None) or f"{self.service}-{self.provider.stage}"
+        return name[:49].rstrip("-")
 
     def deprecations(self) -> list[str]:
         """Settings that still work but should be migrated."""

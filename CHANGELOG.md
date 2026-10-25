@@ -6,6 +6,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+- **Cloud Run target.** `provider.name: cloud-run` deploys the agent as a Cloud Run service, configured by a new
+  `cloudRun` block: ingress, IAP, Direct VPC egress, timeout, CPU throttling, session affinity and port.
+  - **Build:** the source is built with Cloud Build into Artifact Registry, tagged by the hash of the source and the
+    build args, and the service runs it pinned by digest. A prebuilt `cloudRun.image` skips the build.
+  - **Sessions:** platform sessions and Memory Bank live in a companion bare engine, `sessionEngine`.
+  - **Callers:** `access.invokers` get `roles/run.invoker`.
+  - **Publishing:** Gemini Enterprise (A2A) and the Agent Registry register the service's agent card.
+  - **Operations:** `logs`, `metrics`, `open` and `invoke` work against the service. Every call sends an ID token,
+    including the one from plain user credentials.
+- **Agents are never public.** `allUsers` and `allAuthenticatedUsers` are rejected in `access.invokers` on every
+  target. On Cloud Run, the invoker IAM check is always on, and a public grant made outside agentless blocks
+  `plan` and `deploy`.
+
+### Changed
+- The manifest's `deployment_target` must match `provider.name`.
+- `agentless invoke` exits 1 with the agent's error when the stream carries one, instead of printing nothing.
+- Provider orchestration moved to `providers/base.py` (`BaseProvider`). Imports from
+  `agentless.providers.agent_runtime.provider` still work.
+
 ## [0.7.1] - 2026-10-25
 
 ### Fixed

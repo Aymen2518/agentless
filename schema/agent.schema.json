@@ -348,6 +348,114 @@
       "title": "Build",
       "type": "object"
     },
+    "CloudRun": {
+      "additionalProperties": false,
+      "description": "Cloud Run service settings (provider.name: cloud-run); callers always need roles/run.invoker, never public.",
+      "properties": {
+        "serviceName": {
+          "anyOf": [
+            {
+              "pattern": "^[a-z]([a-z0-9-]{0,47}[a-z0-9])?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Defaults to <service>-<stage>.",
+          "title": "Servicename"
+        },
+        "image": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Prebuilt image (e.g. built in CI). When set, agentless does not build the source.",
+          "title": "Image"
+        },
+        "artifactRegistry": {
+          "default": "cloud-run-source-deploy",
+          "description": "Docker repository in provider.region that receives built images; it must already exist.",
+          "pattern": "^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$",
+          "title": "Artifactregistry",
+          "type": "string"
+        },
+        "buildServiceAccount": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Service account Cloud Build runs as; defaults to the project's build default.",
+          "title": "Buildserviceaccount"
+        },
+        "ingress": {
+          "default": "all",
+          "description": "Network sources allowed to reach the service. IAM still applies to every request.",
+          "enum": [
+            "all",
+            "internal",
+            "internal-and-cloud-load-balancing"
+          ],
+          "title": "Ingress",
+          "type": "string"
+        },
+        "iap": {
+          "default": false,
+          "description": "Put Identity-Aware Proxy in front of the service.",
+          "title": "Iap",
+          "type": "boolean"
+        },
+        "vpcEgress": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VpcEgress"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "timeout": {
+          "default": "300s",
+          "description": "Request timeout, at most 3600s.",
+          "pattern": "^\\d+s$",
+          "title": "Timeout",
+          "type": "string"
+        },
+        "cpuThrottling": {
+          "default": false,
+          "description": "Only allocate CPU during requests.",
+          "title": "Cputhrottling",
+          "type": "boolean"
+        },
+        "sessionAffinity": {
+          "default": true,
+          "title": "Sessionaffinity",
+          "type": "boolean"
+        },
+        "port": {
+          "default": 8080,
+          "maximum": 65535,
+          "minimum": 1,
+          "title": "Port",
+          "type": "integer"
+        }
+      },
+      "title": "CloudRun",
+      "type": "object"
+    },
     "DeployerConfig": {
       "additionalProperties": false,
       "description": "Service account agentless impersonates for every GCP call (needs roles/iam.serviceAccountTokenCreator).",
@@ -925,8 +1033,12 @@
       "description": "Where and how the agent is deployed.",
       "properties": {
         "name": {
-          "const": "agent-runtime",
           "default": "agent-runtime",
+          "description": "agent-runtime: a reasoning engine on Agent Runtime. cloud-run: a Cloud Run service (see cloudRun).",
+          "enum": [
+            "agent-runtime",
+            "cloud-run"
+          ],
           "title": "Name",
           "type": "string"
         },
@@ -1317,6 +1429,37 @@
       },
       "title": "Tracing",
       "type": "object"
+    },
+    "VpcEgress": {
+      "additionalProperties": false,
+      "description": "Direct VPC egress of a Cloud Run service.",
+      "properties": {
+        "network": {
+          "description": "VPC network name or full resource name.",
+          "title": "Network",
+          "type": "string"
+        },
+        "subnetwork": {
+          "description": "Subnetwork name or full resource name, in provider.region.",
+          "title": "Subnetwork",
+          "type": "string"
+        },
+        "egress": {
+          "default": "private-ranges-only",
+          "enum": [
+            "private-ranges-only",
+            "all-traffic"
+          ],
+          "title": "Egress",
+          "type": "string"
+        }
+      },
+      "required": [
+        "network",
+        "subnetwork"
+      ],
+      "title": "VpcEgress",
+      "type": "object"
     }
   },
   "additionalProperties": false,
@@ -1368,6 +1511,18 @@
     },
     "resources": {
       "$ref": "#/$defs/Resources"
+    },
+    "cloudRun": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CloudRun"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Cloud Run settings; only with provider.name: cloud-run."
     },
     "custom": {
       "additionalProperties": true,
