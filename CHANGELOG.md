@@ -6,6 +6,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Security
+- **Cloud Run sessions grant scoped to the engine:** the runtime SA gets `roles/aiplatform.user` on the companion
+  session engine only, not on the project. Declare model access in `identity.roles` (as on Agent Runtime).
+- **`deploy --code-only` on Cloud Run** keeps every live service setting (IAP and launch stage were dropped), and no
+  longer lifts the block raised when the service has a public grant.
+- **ID tokens** are only sent to `https://*.run.app` URLs, so a tampered state file can't redirect them.
+
+### Fixed
+- **Redeploying after `remove` failed** with `403 iam.serviceAccounts.get` on both targets: through `projects/-`, IAM
+  answers 403 instead of 404 for a recently deleted service account. User-managed accounts are now looked up in
+  the project their email names.
+- **`remove` of a Cloud Run agent with a session engine stopped half-way:** the engine is deleted before IAM revokes
+  the grant on it. A target that no longer exists now counts as revoked.
+
 ### Added
 - **Cloud Run target.** `provider.name: cloud-run` deploys the agent as a Cloud Run service, configured by a new
   `cloudRun` block: ingress, IAP, Direct VPC egress, timeout, CPU throttling, session affinity and port.

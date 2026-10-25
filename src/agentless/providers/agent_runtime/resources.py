@@ -349,6 +349,13 @@ class AgentIdentityResource(Resource):
         return None
 
 
+def session_engine(ctx: Context) -> str | None:
+    """Companion engine of a Cloud Run agent, once it exists; None when the config doesn't use one."""
+    if not ctx.project.config.session_engine:
+        return None
+    return (ctx.state.resources.get("sessionEngine") or {}).get("name")
+
+
 def _target(k: IamKey) -> str:
     return f"{k[0]}/{k[1]}"
 
@@ -358,7 +365,7 @@ def _why(k: IamKey, automatic: set[IamKey]) -> str:
         return ""
     if k[0] == "bucket":
         return " (automatic: resources.buckets)"
-    return " (automatic: sessions)" if k[2] == "roles/aiplatform.user" else " (automatic: tracing)"
+    return " (automatic: sessions)" if k[0] == "reasoningEngine" else " (automatic: tracing)"
 
 
 TRACING_ROLES = ("roles/cloudtrace.agent", "roles/logging.logWriter", "roles/monitoring.metricWriter")
@@ -418,8 +425,8 @@ class IamResource(Resource):
         }
         if cfg.observability.tracing.enabled and cfg.identity.type != IdentityType.PLATFORM:
             out |= {("project", cfg.provider.project, role, member) for role in TRACING_ROLES}
-        if cfg.session_engine:  # a Cloud Run agent keeps its sessions and memories in a companion engine
-            out.add(("project", cfg.provider.project, "roles/aiplatform.user", member))
+        if engine := session_engine(ctx):  # a Cloud Run agent's sessions and memories, on that engine only
+            out.add(("reasoningEngine", engine, "roles/aiplatform.user", member))
         return out
 
     def _owned(self, ctx: Context) -> set[IamKey]:
@@ -461,8 +468,11 @@ class IamResource(Resource):
         desired = self.desired(ctx, member)
         auto = self._auto_only(ctx, member)
         to_add, to_remove, foreign, missing = self._diff(ctx, desired)
-        # Buckets declared under resources.buckets are created by the buckets step, before IAM runs.
+        # Buckets declared under resources.buckets are created by the buckets step, before IAM runs; a session engine
+        # deleted outside agentless is recreated after it, and IAM is refreshed then.
         created = {f"bucket/{b.name}" for b in ctx.project.config.resources.buckets.values()}
+        if engine := session_engine(ctx):
+            created.add(f"reasoningEngine/{engine}")
         missing_desired = sorted({_target(k) for k in desired if _target(k) in missing and _target(k) not in created})
         details = [f"+ {k[2]} on {_target(k)} → {k[3]}{_why(k, auto)}" for k in sorted(to_add)]
         details += [f"- {k[2]} on {_target(k)} → {k[3]}" for k in sorted(to_remove)]
@@ -493,6 +503,8 @@ class IamResource(Resource):
         to_add, to_remove, _, missing = self._diff(ctx, desired)
         # A removed target (e.g. deleted bucket) has nothing left to revoke.
         to_remove = {k for k in to_remove if _target(k) not in missing}
+        # A session engine being recreated gets its grant in the IAM refresh after it exists.
+        to_add = {k for k in to_add if not (k[0] == "reasoningEngine" and _target(k) in missing)}
         # Owned but undesired bindings that are already gone need no revoke and stop being tracked.
         owned = self._owned(ctx) - ((self._owned(ctx) - desired) - to_remove)
         for target in sorted({_target(k) for k in to_add | to_remove}):
@@ -528,6 +540,11 @@ class IamResource(Resource):
         failures = []
         for target in sorted({_target(k) for k in owned}):
             keys = {k for k in owned if _target(k) == target}
+            rtype, name = next(iter(keys))[:2]
+            if ctx.clients.iam_members(rtype, name) is None:  # gone (e.g. the session engine): its policy went too
+                owned -= keys
+                self._save_owned(ctx, owned)
+                continue
             try:
                 self._modify(ctx, set(), keys)
             except Exception as e:  # noqa: BLE001

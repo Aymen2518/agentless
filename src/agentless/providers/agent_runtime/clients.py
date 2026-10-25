@@ -55,7 +55,7 @@ class GcpClients:
         from google.api_core import exceptions
 
         try:
-            sa = self._iam_admin.get_service_account(name=f"projects/-/serviceAccounts/{email}")
+            sa = self._iam_admin.get_service_account(name=_sa_resource(email))
         except exceptions.NotFound:
             return None
         return {"email": sa.email, "display_name": sa.display_name, "unique_id": sa.unique_id}
@@ -573,6 +573,17 @@ _GE_AGENT_FIELDS = (
     ("authorization_config", "authorization_config"),
     ("sharing_config", "sharing_config"),
 )
+
+
+def _sa_resource(email: str) -> str:
+    """Resource name of a service account, in the project its email names when it is user-managed.
+
+    Through `projects/-`, IAM answers 403 instead of 404 for an account deleted recently (e.g. by `remove`).
+    """
+    domain = email.partition("@")[2]
+    suffix = ".iam.gserviceaccount.com"
+    project = domain.removesuffix(suffix) if domain.endswith(suffix) else "-"
+    return f"projects/{project}/serviceAccounts/{email}"
 
 
 def merge_policy(policy: dict[str, Any], add: Iterable[Binding], remove: Iterable[Binding]) -> None:

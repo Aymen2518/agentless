@@ -15,7 +15,9 @@ User docs: README "Cloud Run target", `examples/cloud-run.yaml`.
    `<display_name>-sessions`, with the Memory Bank `context_spec`.
    - It exists when `memory.sessions: agentPlatform` (the default) or `memoryBank` is set.
    - The service gets `GOOGLE_CLOUD_AGENT_ENGINE_ID` (the numeric id) and `GOOGLE_CLOUD_AGENT_ENGINE_LOCATION`.
-   - The runtime SA gets `roles/aiplatform.user` automatically.
+   - The runtime SA gets `roles/aiplatform.user` on that engine only (`IamResource.automatic`, rtype
+     `reasoningEngine`); model access is declared in `identity.roles`, never granted project-wide. IAM runs before
+     the engine exists, so creating it schedules an `iam` refresh, and a recreated engine doesn't block the plan.
    - Releasing it: the service drops the env var first, and the engine is deleted in `cleanup`.
 3. **Never public:** the user decided that callers always go through IAM, internal-only services included.
    - There is no `allowUnauthenticated`, and `allUsers` / `allAuthenticatedUsers` are rejected in `access.invokers`.
@@ -31,7 +33,9 @@ User docs: README "Cloud Run target", `examples/cloud-run.yaml`.
   - The image is tracked separately: `state.service.build` holds the build tag, or `state.service.image` for a
     prebuilt image.
   - `--code-only` GETs the live service and swaps only the container image, because the stored spec is redacted
-    and can't be re-sent.
+    and can't be re-sent. It sends back every live field except output-only ones (`_OUTPUT_ONLY`), so IAP and the
+    launch stage survive.
+  - `InvokerResource.always_blocks`: its block (a public grant) survives `--code-only`.
   - Adoption requires the `agentless-service` / `agentless-stage` labels; otherwise it blocks.
 - **`InvokerResource`** is `AccessResource` with `rtype = "runService"`, `noun = "service"` and the role fixed to
   `roles/run.invoker`.
@@ -40,7 +44,8 @@ User docs: README "Cloud Run target", `examples/cloud-run.yaml`.
   `GeminiEnterpriseResource` are reused unchanged.
 - **`APP_URL`** is `https://<svc>-<projectNumber>.<region>.run.app`. It's deterministic, so it's known before
   creation and there is no second update like on Agent Runtime.
-- **ID tokens** (`cloud_run/clients.id_token_session`):
+- **ID tokens** (`cloud_run/clients.id_token_session`), only for `https://*.run.app` URLs (`audience` refuses any
+  other, so a tampered state file can't redirect them):
   - An impersonated deployer uses `IDTokenCredentials`.
   - SA keys use `with_target_audience`.
   - Otherwise the metadata server is used.

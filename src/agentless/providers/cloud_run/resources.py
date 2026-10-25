@@ -29,6 +29,30 @@ from agentless.providers.cloud_run import spec as run_spec
 
 _PUBLIC = ("allUsers", "allAuthenticatedUsers")
 _KNOWN_AFTER_APPLY = "<known after apply>"
+# Service fields the API sets; everything else is sent back unchanged by a --code-only update.
+_OUTPUT_ONLY = frozenset(
+    {
+        "name",
+        "uid",
+        "generation",
+        "createTime",
+        "updateTime",
+        "deleteTime",
+        "expireTime",
+        "creator",
+        "lastModifier",
+        "observedGeneration",
+        "terminalCondition",
+        "conditions",
+        "latestReadyRevision",
+        "latestCreatedRevision",
+        "trafficStatuses",
+        "uri",
+        "urls",
+        "reconciling",
+        "satisfiesPzs",
+    }
+)
 
 
 def _hash(value: Any) -> str:
@@ -93,7 +117,8 @@ class SessionEngineResource(Resource):
             operation = ctx.clients.engine_create(config)
             st = {"name": operation.rpartition("/operations/")[0], "spec": None}
             self._set_state(ctx, st)  # named before waiting, so a crash leaves it tracked
-            ctx.reapply.add("service")  # GOOGLE_CLOUD_AGENT_ENGINE_ID points at the new engine
+            # GOOGLE_CLOUD_AGENT_ENGINE_ID points at the new engine, and the runtime SA's grant on it follows.
+            ctx.reapply.update({"iam", "service"})
         else:
             config["update_mask"] = ",".join(masks)
             operation = ctx.clients.engine_update(st["name"], config)
@@ -309,9 +334,9 @@ class ServiceResource(Resource):
         st = self._state(ctx)
         url = self._url(ctx)
         if ctx.options.code_only and live is not None and st.get("spec") is not None:
-            # Only the image changes; the rest of the live config stays as the last full deploy left it.
-            live["template"]["containers"][0]["image"] = image
-            body = {k: v for k, v in live.items() if k in ("labels", "description", "ingress", "template")}
+            # Only the image changes; every other setting (IAP, launch stage, scaling…) stays as it is live.
+            body = {k: v for k, v in live.items() if k not in _OUTPUT_ONLY}
+            body["template"]["containers"][0]["image"] = image
             body["invokerIamDisabled"] = False
             ctx.clients.run_service_update(name, body)
             spec = st["spec"]
@@ -363,6 +388,7 @@ class InvokerResource(AccessResource):
 
     rtype = "runService"
     noun = "service"
+    always_blocks = True  # a public service blocks even `--code-only`
 
     @staticmethod
     def _engine(ctx: Context) -> str | None:
