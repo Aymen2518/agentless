@@ -313,7 +313,7 @@
     },
     "BucketLifecycle": {
       "additionalProperties": false,
-      "description": "Object lifecycle; agentless owns the bucket's lifecycle rules once this is set.",
+      "description": "Object lifecycle; agentless owns the bucket's lifecycle rules once this is set, and leaves them alone otherwise.",
       "properties": {
         "deleteAfterDays": {
           "anyOf": [

@@ -142,6 +142,7 @@ def bucket_spec(ctx: Context, key: str) -> dict[str, Any]:
         "location": (bucket.location or cfg.provider.region).upper(),
         "storage_class": bucket.storage_class,
         "versioning": bucket.versioning,
+        "manage_lifecycle": "lifecycle" in bucket.model_fields_set,
         "delete_after_days": bucket.lifecycle.delete_after_days,
         "labels": dict(sorted(labels.items())),
         "kms_key": bucket.kms_key,
@@ -152,7 +153,10 @@ _BUCKET_FIELDS = ("storage_class", "versioning", "delete_after_days", "kms_key")
 
 
 def _bucket_diff(desired: dict[str, Any], live: dict[str, Any]) -> list[str]:
-    diffs = [f"{f}: {live.get(f)!r} → {desired[f]!r}" for f in _BUCKET_FIELDS if live.get(f) != desired[f]]
+    fields = [f for f in _BUCKET_FIELDS if desired["manage_lifecycle"] or f != "delete_after_days"]
+    diffs = [f"{f}: {live.get(f)!r} → {desired[f]!r}" for f in fields if live.get(f) != desired[f]]
+    if desired["manage_lifecycle"] and live.get("other_lifecycle_rules"):
+        diffs.append(f"lifecycle: {live['other_lifecycle_rules']} other rule(s) → removed")
     # Labels set outside agentless are left alone; only ours must match.
     labels = {k: v for k, v in desired["labels"].items() if (live.get("labels") or {}).get(k) != v}
     diffs += [f"labels.{k}: {(live.get('labels') or {}).get(k)!r} → {v!r}" for k, v in labels.items()]

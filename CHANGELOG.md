@@ -6,6 +6,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+- **Bucket lifecycle rules are no longer erased** when a bucket is adopted or updated without `lifecycle` in
+  `agent.yaml`. Rules set outside agentless are kept until `lifecycle` is declared. Once it is, `plan` also shows
+  rules that `deleteAfterDays` can't express (prefix conditions, storage class transitions) as removed.
+
 ## [0.7.0] - 2026-10-22
 
 ### Added

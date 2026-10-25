@@ -119,6 +119,7 @@ def _existing(gcp, project_number="123456", **extra):
         "storage_class": "STANDARD",
         "versioning": False,
         "delete_after_days": None,
+        "other_lifecycle_rules": 0,
         "labels": {},
         "kms_key": None,
         "project_number": project_number,
@@ -137,6 +138,35 @@ def test_existing_bucket_in_project_is_adopted_and_kept_on_remove(make_provider,
     assert make_provider().store.read().resources["buckets"]["items"][NAME]["created"] is False
     make_provider().remove(YES)
     assert NAME in gcp.buckets, "an adopted bucket is never deleted"
+
+
+def test_adopting_without_lifecycle_keeps_existing_rules(make_provider, gcp, reports):
+    _existing(gcp, delete_after_days=30, other_lifecycle_rules=2)
+    cs = plan(make_provider)
+    assert not any("lifecycle" in d or "delete_after_days" in d for d in change(cs, "buckets").details)
+    deploy(make_provider)
+    update = next(c for c in gcp.calls if c[0] == "bucket_update")
+    assert update[2]["manage_lifecycle"] is False
+    assert (gcp.buckets[NAME]["delete_after_days"], gcp.buckets[NAME]["other_lifecycle_rules"]) == (30, 2)
+    assert not plan(make_provider).pending
+
+
+def test_declared_lifecycle_replaces_existing_rules_visibly(make_provider, gcp, reports):
+    reports(lifecycle={"deleteAfterDays": 90})
+    _existing(gcp, other_lifecycle_rules=2)
+    details = change(plan(make_provider), "buckets").details
+    assert f"~ {NAME} delete_after_days: None → 90" in details
+    assert f"~ {NAME} lifecycle: 2 other rule(s) → removed" in details
+    deploy(make_provider)
+    assert (gcp.buckets[NAME]["delete_after_days"], gcp.buckets[NAME]["other_lifecycle_rules"]) == (90, 0)
+
+
+def test_empty_lifecycle_clears_rules(make_provider, gcp, reports):
+    reports(lifecycle={})
+    _existing(gcp, delete_after_days=30)
+    assert f"~ {NAME} delete_after_days: 30 → None" in change(plan(make_provider), "buckets").details
+    deploy(make_provider)
+    assert gcp.buckets[NAME]["delete_after_days"] is None
 
 
 def test_bucket_of_another_project_is_blocked(make_provider, gcp, reports):
