@@ -83,14 +83,24 @@ class FakeGcp:
         if name in self.buckets:
             raise RuntimeError(f"409 bucket {name} already exists")
         self.calls.append(("bucket_create", name, spec))
-        self.buckets[name] = {**spec, "labels": dict(spec["labels"]), "project_number": "123456"}
+        live = {k: v for k, v in spec.items() if k != "manage_lifecycle"}
+        self.buckets[name] = {
+            **live,
+            "labels": dict(spec["labels"]),
+            "other_lifecycle_rules": 0,
+            "project_number": "123456",
+        }
         self.absent_buckets.discard(name)
 
     def bucket_update(self, name: str, spec: dict[str, Any]) -> None:
         self.calls.append(("bucket_update", name, spec))
         live = self.buckets[name]
-        live.update({k: v for k, v in spec.items() if k not in ("labels", "location")})
+        managed = spec["manage_lifecycle"]
+        skip = {"labels", "location", "manage_lifecycle"} | (set() if managed else {"delete_after_days"})
+        live.update({k: v for k, v in spec.items() if k not in skip})
         live["labels"] = {**live.get("labels", {}), **spec["labels"]}
+        if managed:
+            live["other_lifecycle_rules"] = 0
 
     def bucket_is_empty(self, name: str) -> bool:
         return not self.bucket_objects[name]

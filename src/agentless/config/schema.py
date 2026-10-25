@@ -324,7 +324,7 @@ BUCKET_ROLES = {
 
 
 class BucketLifecycle(_Model):
-    """Object lifecycle; agentless owns the bucket's lifecycle rules once this is set."""
+    """Object lifecycle; agentless owns the bucket's lifecycle rules once this is set, and leaves them alone otherwise."""
 
     delete_after_days: int | None = Field(default=None, ge=1, description="Delete objects older than this.")
 

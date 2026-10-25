@@ -260,8 +260,9 @@ resources:
 ```
 
 - **Always on:** uniform bucket-level access, public access prevention, and the `agentless-*` labels plus
-  `provider.labels`. Labels set outside agentless are kept. Once `lifecycle` is managed, agentless owns the bucket's
-  lifecycle rules.
+  `provider.labels`. Labels set outside agentless are kept. Lifecycle rules are left alone until `lifecycle` is
+  declared; from then on agentless owns all of them, and `plan` shows any other rule it would remove.
+  `lifecycle: {}` clears them.
 - **Access is automatic:** the `access` role is granted to the runtime identity (service account, Agent Identity
   principal or platform service agent). `plan` marks it `(automatic: resources.buckets)`.
 - **Reference it elsewhere** with `${self:resources.buckets.reports.name}`.

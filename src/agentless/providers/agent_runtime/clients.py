@@ -216,18 +216,22 @@ class GcpClients:
             return None
         except exceptions.Forbidden:
             return {"name": name, "forbidden": True}
+        rules = list(bucket.lifecycle_rules)
         ages = [
             r.get("condition", {}).get("age")
-            for r in bucket.lifecycle_rules
+            for r in rules
             if r.get("action", {}).get("type") == "Delete" and set(r.get("condition", {})) == {"age"}
         ]
+        delete_after_days = ages[0] if len(ages) == 1 else None
         return {
             "name": name,
             "project_number": str(bucket.project_number) if bucket.project_number else None,
             "location": bucket.location or "",
             "storage_class": bucket.storage_class,
             "versioning": bool(bucket.versioning_enabled),
-            "delete_after_days": ages[0] if len(ages) == 1 else None,
+            "delete_after_days": delete_after_days,
+            # Rules agentless can't express as delete_after_days, replaced only when lifecycle is managed.
+            "other_lifecycle_rules": len(rules) - (delete_after_days is not None),
             "labels": dict(bucket.labels or {}),
             "kms_key": bucket.default_kms_key_name,
         }
@@ -664,6 +668,8 @@ def _apply_bucket_spec(bucket: Any, spec: dict[str, Any], labels: dict[str, str]
     bucket.labels = labels
     if spec["kms_key"] or bucket.default_kms_key_name:
         bucket.default_kms_key_name = spec["kms_key"]
+    if not spec["manage_lifecycle"]:
+        return  # rules set outside agentless are kept until agent.yaml declares a lifecycle
     bucket.clear_lifecycle_rules()
     if spec["delete_after_days"]:
         bucket.add_lifecycle_delete_rule(age=spec["delete_after_days"])
