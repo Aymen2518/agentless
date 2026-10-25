@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-10-25
+
 ### Fixed
 - **Bucket lifecycle rules are no longer erased** when a bucket is adopted or updated without `lifecycle` in
   `agent.yaml`. Rules set outside agentless are kept until `lifecycle` is declared. Once it is, `plan` also shows
@@ -152,7 +154,8 @@ First public release: wheel and sdist (`agentless-cli`) on the GitHub Release, a
 - Plugins through pluggy entry points in the `agentless` group.
 - Multi-arch container image and Claude Code skills for developing agentless and deploying agents with it.
 
-[Unreleased]: https://github.com/Aymen2518/agentless/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/Aymen2518/agentless/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/Aymen2518/agentless/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/Aymen2518/agentless/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/Aymen2518/agentless/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/Aymen2518/agentless/compare/v0.4.0...v0.5.0
