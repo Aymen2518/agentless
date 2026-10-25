@@ -81,3 +81,8 @@
   can answer 403 for a few minutes.
 - **Gemini models retire:** a dummy agent on `gemini-2.5-flash` got a 404 "Publisher model ... not found" at
   invoke time. `agentless invoke` now fails loudly on error events instead of printing nothing.
+- **`projects/-/serviceAccounts/<email>` answers 403 for a recently deleted account** (404 only for one that never
+  existed). Look user-managed accounts up in their own project (`clients._sa_resource`), or a redeploy after
+  `remove` fails at the first step.
+- **IAM propagation:** a project grant to a new runtime SA can take minutes to apply. The first `invoke` right after a
+  deploy may fail with `403 aiplatform.endpoints.predict`; retry before suspecting the grant.

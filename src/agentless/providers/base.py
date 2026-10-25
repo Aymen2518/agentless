@@ -104,10 +104,12 @@ class BaseProvider:
         changeset = ChangeSet([r.plan(ctx) for r in self.resources])
         if options.code_only:
             # Identity, IAM and publishing follow config, so they wait for the next full deploy too.
+            gates = {r.key for r in self.resources if r.always_blocks}
             for change in changeset.changes:
                 if change.resource not in self.code_resources and change.action != Action.NOOP:
                     change.details.insert(0, f"{change.action.value} deferred by --code-only")
-                    change.action, change.blocked, change.data = Action.NOOP, None, {}
+                    blocked = change.blocked if change.resource in gates else None
+                    change.action, change.blocked, change.data = Action.NOOP, blocked, {}
         self.hooks.hook.agentless_after_plan(context=ctx, changeset=changeset)
         return ctx, changeset
 

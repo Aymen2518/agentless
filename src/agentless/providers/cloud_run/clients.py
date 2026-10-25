@@ -177,9 +177,12 @@ class CloudRunClients(GcpClients):
 
 
 def audience(url: str) -> str:
-    """ID-token audience Cloud Run expects: the URL origin."""
+    """ID-token audience Cloud Run expects: the URL origin. Only Cloud Run URLs ever get a token."""
     parts = urllib.parse.urlsplit(url)
-    return f"{parts.scheme}://{parts.netloc}"
+    host = parts.hostname or ""
+    if parts.scheme != "https" or not host.endswith(".run.app") or parts.username or parts.port:
+        raise RuntimeError(f"refusing to send credentials to {url!r}: not an https://*.run.app Cloud Run URL")
+    return f"https://{host}"
 
 
 def id_token_session(credentials: Any, url: str) -> Any:
@@ -195,7 +198,7 @@ def id_token_session(credentials: Any, url: str) -> Any:
     from google.oauth2 import credentials as user_credentials
     from google.oauth2 import id_token
 
-    target = audience(url)
+    target = audience(url)  # validates the URL before any credential is touched
     if isinstance(credentials, impersonated_credentials.Credentials):
         token_credentials: Any = impersonated_credentials.IDTokenCredentials(
             credentials, target_audience=target, include_email=True

@@ -304,7 +304,10 @@ def test_platform_sessions_get_a_companion_engine(make_run, gcp: FakeGcp, edit) 
     assert env["GOOGLE_CLOUD_AGENT_ENGINE_ID"] == engine.rsplit("/", 1)[-1]
     assert env["GOOGLE_CLOUD_AGENT_ENGINE_LOCATION"] == "europe-west1"
     sa = "serviceAccount:sample-dev@proj-dev.iam.gserviceaccount.com"
-    assert sa in gcp.policies[("project", "proj-dev")]["roles/aiplatform.user"]
+    # The sessions grant is scoped to the engine; the project grant is only what identity.roles declares.
+    assert gcp.policies[("reasoningEngine", engine)]["roles/aiplatform.user"] == {sa}
+    owned = make_run().store.read().resources["iam"]["bindings"]  # type: ignore[union-attr]
+    assert ["reasoningEngine", engine, "roles/aiplatform.user", sa] in owned
     # back to in-memory: the service drops the engine first, then the engine goes
     edit(lambda d: d.update(memory={"sessions": "inMemory"}))
     deploy(make_run())
@@ -472,3 +475,78 @@ def test_internal_ingress_with_gemini_enterprise_warns(make_run, edit) -> None:
     _, changeset = make_run().plan(DeployOptions())
     service = next(c for c in changeset.changes if c.resource == "service")
     assert any("Gemini Enterprise calls the agent from outside your VPC" in d for d in service.details)
+
+
+def test_sessions_grant_is_not_project_wide(make_run, gcp: FakeGcp, edit) -> None:
+    edit(lambda d: (d["identity"]["roles"].update(project=[]), d.update(memory={"sessions": "agentPlatform"})))
+    deploy(make_run())
+    sa = "serviceAccount:sample-dev@proj-dev.iam.gserviceaccount.com"
+    assert sa not in gcp.policies[("project", "proj-dev")].get("roles/aiplatform.user", set())
+    (engine,) = gcp.engines
+    assert sa in gcp.policies[("reasoningEngine", engine)]["roles/aiplatform.user"]
+    # recreated outside agentless: the plan isn't blocked, and the new engine gets the grant
+    gcp.engine_delete(engine)
+    _, changeset = make_run().plan(DeployOptions())
+    assert not changeset.blocked
+    deploy(make_run())
+    (new,) = gcp.engines
+    assert sa in gcp.policies[("reasoningEngine", new)]["roles/aiplatform.user"]
+
+
+def test_code_only_keeps_live_security_settings(make_run, gcp: FakeGcp, run_dir: Path, edit) -> None:
+    edit(lambda d: d.update(cloudRun={"iap": True}))
+    deploy(make_run())
+    (run_dir / "app" / "agent.py").write_text("# changed\n")
+    deploy(make_run(), code_only=True)
+    service = _service(gcp)
+    assert service["iapEnabled"] is True and service["launchStage"] == "BETA"
+    assert service["invokerIamDisabled"] is False
+    assert "uri" in service  # output-only fields are the API's, not sent back
+
+
+def test_code_only_does_not_lift_the_public_block(make_run, gcp: FakeGcp, run_dir: Path) -> None:
+    deploy(make_run())
+    gcp.policies[("runService", SERVICE)]["roles/run.invoker"].add("allUsers")
+    (run_dir / "app" / "agent.py").write_text("# changed\n")
+    with pytest.raises(DeployError, match="callable through IAM"):
+        deploy(make_run(), code_only=True)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://svc-1.europe-west1.run.app/x",
+        "https://evil.example.com/a2a/app/.well-known/agent-card.json",
+        "https://svc.run.app.evil.example.com/",
+        "https://user@svc-1.europe-west1.run.app/",
+        "https://svc-1.europe-west1.run.app:8443/",
+    ],
+)
+def test_credentials_only_go_to_cloud_run_urls(url: str) -> None:
+    from agentless.providers.cloud_run.clients import id_token_session
+
+    with pytest.raises(RuntimeError, match="refusing to send credentials"):
+        id_token_session(object(), url)
+
+
+def test_cloud_run_urls_are_accepted() -> None:
+    from agentless.providers.cloud_run.clients import audience
+
+    assert audience(f"{URL}/a2a/app/.well-known/agent-card.json") == URL
+
+
+def test_service_accounts_are_looked_up_in_their_own_project() -> None:
+    # Through projects/-, IAM answers 403 (not 404) for a recently deleted account, so a redeploy after remove failed.
+    from agentless.providers.agent_runtime.clients import _sa_resource
+
+    email = "dummy-agent-dev@acme-dev.iam.gserviceaccount.com"
+    assert _sa_resource(email) == f"projects/acme-dev/serviceAccounts/{email}"
+    assert _sa_resource("123-compute@developer.gserviceaccount.com").startswith("projects/-/")
+
+
+def test_remove_with_a_session_engine_is_complete(make_run, gcp: FakeGcp, edit) -> None:
+    # The engine is deleted before IAM revokes its grant on it: that grant must count as gone, not fail the remove.
+    edit(lambda d: d.update(memory={"sessions": "agentPlatform"}))
+    deploy(make_run())
+    assert make_run().remove(lambda _: True)
+    assert not gcp.engines and make_run().store.read() is None

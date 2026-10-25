@@ -498,7 +498,7 @@ access:
 | # | Resource | Owns |
 |---|---|---|
 | 1 | `serviceAccount`, `buckets`, `iam` | same as on Agent Runtime; the runtime identity is always a service account |
-| 2 | `sessionEngine` | a bare reasoning engine (no code) holding sessions and the Memory Bank, when `memory.sessions` is `agentPlatform` (the default) or `memory.memoryBank` is set. The service gets `GOOGLE_CLOUD_AGENT_ENGINE_ID`, and the runtime SA `roles/aiplatform.user`. Use `sessions: inMemory` to skip it |
+| 2 | `sessionEngine` | a bare reasoning engine (no code) holding sessions and the Memory Bank, when `memory.sessions` is `agentPlatform` (the default) or `memory.memoryBank` is set. The service gets `GOOGLE_CLOUD_AGENT_ENGINE_ID`, and the runtime SA `roles/aiplatform.user` on that engine only (declare model access, e.g. `roles/aiplatform.user` on the project, in `identity.roles` as on Agent Runtime). Use `sessions: inMemory` to skip it |
 | 3 | `build` | the image: the packaged source is uploaded to the staging bucket, built by Cloud Build and pushed to `<region>-docker.pkg.dev/<project>/<cloudRun.artifactRegistry>/<service>:<hash>`. The tag hashes the source and build args, so an image already in the registry is never rebuilt. Skipped when `cloudRun.image` is set (built in CI) |
 | 4 | `service` | the Cloud Run service, `<service>-<stage>` unless `cloudRun.serviceName`. Its config is diffed against the last-applied spec. Each change is a new revision, and the image is pinned by digest. `APP_URL` is the service's `run.app` URL, which is known before creation |
 | 5 | `access` | `roles/run.invoker` on the service for `access.invokers` and the Gemini Enterprise service agent |
@@ -511,6 +511,8 @@ access:
 - `allUsers` and `allAuthenticatedUsers` are rejected in `access.invokers`.
 - If someone grants them on the service outside agentless, `plan` and `deploy` stop until the binding is removed.
 - `cloudRun.ingress: internal` limits where requests can come from, on top of IAM, never instead of it.
+- `deploy --code-only` keeps every other live setting (IAP included), and a public grant still blocks it.
+- ID tokens are only ever sent to `https://*.run.app` URLs.
 - Callers on GCP get an ID token from the metadata server (`google.oauth2.id_token.fetch_id_token`).
 - agentless's own calls (agent card, `invoke`) always send an ID token: the impersonated deployer's, a service
   account key's, the metadata server's, or the one your `gcloud auth application-default login` refresh returns.

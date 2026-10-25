@@ -86,6 +86,8 @@ class Resource(ABC):
     """A managed GCP object; resources are applied in list order and destroyed in reverse."""
 
     key: str = ""
+    # Its blocks are security gates: `--code-only` defers its changes but never lifts a block.
+    always_blocks: bool = False
 
     @abstractmethod
     def plan(self, ctx: Context) -> Change:
