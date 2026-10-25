@@ -10,6 +10,7 @@ import yaml
 from agentless.config.loader import Project, load_project
 from agentless.hooks import plugin_manager
 from agentless.providers.agent_runtime.provider import AgentRuntimeProvider
+from agentless.providers.cloud_run.provider import CloudRunProvider
 from agentless.state.store import LocalStateStore
 from tests.fakes import FakeGcp
 
@@ -56,10 +57,9 @@ def fake_cli(monkeypatch: pytest.MonkeyPatch, gcp: FakeGcp, agent_dir: Path) -> 
     """Route the CLI's provider to FakeGcp and a local store."""
     from agentless import cli
 
-    def provider(project: Project, pm: object) -> AgentRuntimeProvider:
-        return AgentRuntimeProvider(
-            project, hooks=pm, clients=gcp, store=LocalStateStore(agent_dir, project.stage), echo=lambda _: None
-        )
+    def provider(project: Project, pm: object) -> AgentRuntimeProvider | CloudRunProvider:
+        cls = CloudRunProvider if project.config.provider.name == "cloud-run" else AgentRuntimeProvider
+        return cls(project, hooks=pm, clients=gcp, store=LocalStateStore(agent_dir, project.stage), echo=lambda _: None)
 
     monkeypatch.setattr(cli, "_provider", provider)
     return agent_dir

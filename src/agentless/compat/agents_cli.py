@@ -49,8 +49,18 @@ def read_manifest(project_dir: Path) -> Manifest | None:
     )
 
 
-def write_deployment_metadata(project_dir: Path, *, engine_name: str, agent_directory: str, is_a2a: bool) -> Path:
-    """Write the file agents-cli reads for `run --url`, `deploy --status` and `publish`."""
+def write_deployment_metadata(
+    project_dir: Path,
+    *,
+    engine_name: str | None = None,
+    service_url: str | None = None,
+    agent_directory: str,
+    is_a2a: bool,
+) -> Path:
+    """Write the file agents-cli reads for `run --url`, `deploy --status` and `publish`.
+
+    An Agent Runtime deployment records its engine; a Cloud Run deployment its service URL.
+    """
     path = project_dir / METADATA_FILE
     data: dict[str, Any] = {}
     if path.is_file():
@@ -59,9 +69,13 @@ def write_deployment_metadata(project_dir: Path, *, engine_name: str, agent_dire
         except json.JSONDecodeError:
             data = {}
     data.pop("pending_operation", None)
+    if service_url:
+        data.pop("remote_agent_runtime_id", None)
+        data.update(service_url=service_url, deployment_target="cloud_run")
+    else:
+        data.pop("service_url", None)
+        data.update(remote_agent_runtime_id=engine_name, deployment_target="agent_runtime")
     data.update(
-        remote_agent_runtime_id=engine_name,
-        deployment_target="agent_runtime",
         is_a2a=is_a2a,
         agent_directory=agent_directory,
         deployment_timestamp=datetime.datetime.now(tz=datetime.UTC).isoformat(),

@@ -74,7 +74,7 @@ def desired_spec(project: Project, *, service_account: str | None, engine_name: 
         "container_concurrency": agent.runtime.concurrency,
         "agent_server_mode": agent.runtime.server_mode.value if agent.runtime.server_mode else None,
         "psc_interface_config": _psc(project),
-        "context_spec": _context_spec(project),
+        "context_spec": context_spec(project),
         "encryption_spec": {"kms_key_name": agent.encryption.kms_key} if agent.encryption.kms_key else None,
         "build_args": dict(sorted(agent.build.args.items())),
     }
@@ -82,6 +82,16 @@ def desired_spec(project: Project, *, service_account: str | None, engine_name: 
 
 def _env(project: Project, engine_name: str | None) -> dict[str, str]:
     """User env plus the defaults agents-cli injects, so both tools deploy identical runtimes."""
+    cfg = project.config
+    env = base_env(project)
+    env.setdefault("GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY", str(cfg.observability.tracing.enabled).lower())
+    if engine_name:
+        env.setdefault("APP_URL", app_url(cfg.provider.region, engine_name))
+    return env
+
+
+def base_env(project: Project) -> dict[str, str]:
+    """Env every target sets: user env, sessions, buckets, model routing and trace content capture."""
     cfg = project.config
     env = dict(cfg.agent.environment)
     if cfg.memory.sessions == "inMemory":
@@ -98,7 +108,6 @@ def _env(project: Project, engine_name: str | None) -> dict[str, str]:
         env.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "true")
         env.setdefault("GOOGLE_CLOUD_LOCATION", "global")
     tracing = cfg.observability.tracing
-    env.setdefault("GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY", str(tracing.enabled).lower())
     env.setdefault(
         "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT",
         "SPAN_AND_EVENT" if tracing.capture_content else "NO_CONTENT",
@@ -106,8 +115,6 @@ def _env(project: Project, engine_name: str | None) -> dict[str, str]:
     env.setdefault("ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS", str(tracing.capture_content).lower())
     if cfg.evaluation.monitors:  # online monitors read the gen_ai semantic conventions from traces
         env.setdefault("OTEL_SEMCONV_STABILITY_OPT_IN", "gen_ai_latest_experimental")
-    if engine_name:
-        env.setdefault("APP_URL", app_url(cfg.provider.region, engine_name))
     return env
 
 
@@ -152,7 +159,8 @@ def _model_path(project: Project, model: str) -> str:
     return f"projects/{project.config.provider.project}/locations/{project.config.provider.region}/publishers/google/models/{model}"
 
 
-def _context_spec(project: Project) -> dict[str, Any] | None:
+def context_spec(project: Project) -> dict[str, Any] | None:
+    """Memory Bank config of an engine (context_spec), or None."""
     bank = project.config.memory.memory_bank
     if bank is None:
         return None
@@ -266,5 +274,6 @@ def redact(spec: dict[str, Any], sensitive: frozenset[str]) -> dict[str, Any]:
 
     out = dict(spec)
     for name in ("env", "build_args"):
-        out[name] = {k: mask(v) for k, v in spec[name].items()}
+        if name in spec:
+            out[name] = {k: mask(v) for k, v in spec[name].items()}
     return out

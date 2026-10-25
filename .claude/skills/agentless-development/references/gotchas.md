@@ -75,3 +75,9 @@
 - **Not verified live yet:** the unit of the `duration` trace predicate (sent as `minDurationSeconds` unchanged),
   whether the Evaluation Service's service agent needs an explicit grant on `evaluation.dest`, and the REST request
   shapes of `onlineEvaluators` (taken from the v1beta1 protos in the pinned SDK).
+
+- **Cloud Run target, regional Cloud Build:** the operation name returned by `POST .../locations/<r>/builds` isn't served
+  by `GET /v1/operations/...` (404). Poll the build resource instead. Right after enabling Cloud Build, build creation
+  can answer 403 for a few minutes.
+- **Gemini models retire:** a dummy agent on `gemini-2.5-flash` got a 404 "Publisher model ... not found" at
+  invoke time. `agentless invoke` now fails loudly on error events instead of printing nothing.
