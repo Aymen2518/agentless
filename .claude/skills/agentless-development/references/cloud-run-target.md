@@ -30,6 +30,15 @@ User docs: README "Cloud Run target", `examples/cloud-run.yaml`.
      (`spec.auth_env`; the loader rejects these names in `agent.environment` and `agent.secrets`). `id_token_session(app_header=…)` sends both headers,
      and `CloudRunClients.app_token_header` makes agent card reads do the same. `TokenSession.rebuild_auth` drops both headers on a cross-host redirect (requests only strips `Authorization`). Exclusive with `iap` and
      `ingress: internal`.
+   - `auth: webhook` (2026-10-29): the one opt-in exception, for GitLab/GitHub webhooks that can't mint a Google
+     token. `spec.desired_spec` adds `invoker_iam_disabled: True` (key only present in this mode, so other stored
+     specs don't diff) and `api_service` sends it as `invokerIamDisabled`. The container gets
+     `AGENTLESS_WEBHOOK_HEADER` plus `AGENTLESS_WEBHOOK_SECRET` as a `secretKeyRef`; `IamResource.declared` grants
+     the runtime SA accessor on it. `ServiceResource._check_webhook_gate` probes anonymously after every rollout
+     (`CloudRunClients.webhook_probe`: no header, then a random wrong value) and, unless both are 401/403, PATCHes
+     `invokerIamDisabled: False` and raises: fail closed, state not saved, so the next deploy retries. `allUsers`
+     still blocks. The schema rejects `access.invokers`, `publish` and `iap` with it. `invoke` uses
+     `webhook_session` (secret header only, read via `sources.read_secret`, dropped on cross-host redirects).
 4. **v1 scope:** invokers, GE (A2A only), Agent Registry, Direct VPC egress, ingress, IAP.
 
 ## Resource notes
@@ -91,6 +100,7 @@ User docs: README "Cloud Run target", `examples/cloud-run.yaml`.
 - `auth: googleToken`: that Cloud Run accepts `X-Serverless-Authorization` from user and impersonated tokens and
   forwards the custom `x-google-token` header unchanged (the docs don't list `X-Google-*` as reserved). Check it
   with a header-echo service before relying on it.
+- `auth: webhook`: `invokerIamDisabled: true` through the v2 API, and the anonymous probe against a real service.
 - Direct IAP (`iapEnabled` plus `launchStage: BETA`), Direct VPC egress, and `--code-only` (output-only fields left in
   the body).
 - Gemini Enterprise A2A registration of a Cloud Run card URL, the Agent Registry, and GE's service agent calling the

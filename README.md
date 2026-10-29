@@ -504,7 +504,8 @@ access:
 | 5 | `access` | `roles/run.invoker` on the service for `access.invokers` and the Gemini Enterprise service agent |
 | 6 | `agentRegistry`, `geminiEnterprise` | the agent card served by the service (Gemini Enterprise registration is `a2a` on Cloud Run) |
 
-**Never public.** Every caller needs a Google identity that holds `roles/run.invoker`:
+**Never public** (unless you opt into [`auth: webhook`](#webhook-mode)). Every caller needs a Google identity that
+holds `roles/run.invoker`:
 
 - The service is always deployed with the invoker IAM check on. If someone turns it off, the next deploy turns it
   back on.
@@ -595,6 +596,58 @@ async def verify_google_token(request: Request, call_next):
             return JSONResponse({"error": "invalid token"}, status_code=401)
         if not _allowed(claims):
             return JSONResponse({"error": "forbidden"}, status_code=403)
+    return await call_next(request)
+```
+
+<a id="webhook-mode"></a>
+**Webhook receiver (`cloudRun.auth: webhook`).** GitLab and GitHub webhooks can't send a Google ID token, so they
+can't pass Cloud Run IAM. This mode is the one exception to "never public": Cloud Run's invoker IAM check is off, and
+the container lets in only requests that carry a shared secret.
+
+```yaml
+cloudRun:
+  auth: webhook
+  webhook:
+    header: x-gitlab-token                       # default; GitLab sends the hook's secret token in X-Gitlab-Token
+    secret: { secret: gitlab-webhook-token }     # Secret Manager; version defaults to latest
+```
+
+- **Cloud Run:** the service is deployed with `invokerIamDisabled: true`. That bypasses IAM without an `allUsers`
+  grant, so Domain Restricted Sharing doesn't block it (the `run.managed.requireInvokerIam` org policy does).
+  `allUsers` and `allAuthenticatedUsers` are still rejected and still block deploys. `access.invokers` and `publish`
+  are rejected: IAM grants nothing here, and Gemini Enterprise and the Agent Registry can't send the secret.
+- **The container** gets `AGENTLESS_AUTH_MODE=webhook`, `AGENTLESS_WEBHOOK_HEADER`, and `AGENTLESS_WEBHOOK_SECRET`
+  (read from Secret Manager by Cloud Run, never by agentless). The runtime SA gets `secretAccessor` on that secret.
+  The container must answer **401 or 403 to every request, on every path,** unless the header matches. Compare the
+  two values in constant time.
+- **agentless checks it after every rollout (fail closed).** It calls `GET /` with no credentials, once without the
+  header and once with a wrong value. If either answer isn't 401 or 403, it turns the invoker IAM check back on and
+  the deploy fails. The next deploy tries again. The service is reachable anonymously only from when the revision
+  serves until the check ends, a few seconds.
+- **`invoke`** reads the secret from Secret Manager as the deployer (or takes `--app-token`) and sends only that
+  header, with no Google token. The header is dropped on a redirect to another host.
+- The secret is all that protects the service: rotate it in Secret Manager and in the webhook together. Keep
+  `ingress: all` for SaaS senders. A self-hosted GitLab in your VPC can use `ingress: internal` on top.
+
+The check in an agents-cli FastAPI app (`app/fast_api_app.py`):
+
+```python
+import hmac
+import os
+
+from fastapi import Request
+from fastapi.responses import JSONResponse
+
+HEADER = os.environ.get("AGENTLESS_WEBHOOK_HEADER")
+SECRET = os.environ.get("AGENTLESS_WEBHOOK_SECRET", "").encode()
+
+
+@app.middleware("http")
+async def verify_webhook_secret(request: Request, call_next):
+    if os.environ.get("AGENTLESS_AUTH_MODE") == "webhook":
+        sent = request.headers.get(HEADER or "", "").encode()
+        if not SECRET or not hmac.compare_digest(sent, SECRET):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
     return await call_next(request)
 ```
 

@@ -350,7 +350,7 @@
     },
     "CloudRun": {
       "additionalProperties": false,
-      "description": "Cloud Run service settings (provider.name: cloud-run); callers always need roles/run.invoker, never public.",
+      "description": "Cloud Run service settings (provider.name: cloud-run); callers need roles/run.invoker unless auth: webhook.",
       "properties": {
         "serviceName": {
           "anyOf": [
@@ -418,10 +418,11 @@
         },
         "auth": {
           "default": "iam",
-          "description": "iam: Cloud Run checks the caller's ID token (Authorization). googleToken: Cloud Run still checks it, sent as X-Serverless-Authorization, and the container also verifies the Google token in googleToken.header. The invoker IAM check is never turned off.",
+          "description": "iam: Cloud Run checks the caller's ID token (Authorization). googleToken: Cloud Run still checks it, sent as X-Serverless-Authorization, and the container also verifies the Google token in googleToken.header. webhook: for callers that cannot get a Google token (GitLab, GitHub webhooks): Cloud Run's invoker IAM check is off and the container must reject every request without the secret in webhook.header; agentless checks that it does after each rollout and turns IAM back on if not.",
           "enum": [
             "iam",
-            "googleToken"
+            "googleToken",
+            "webhook"
           ],
           "title": "Auth",
           "type": "string"
@@ -437,6 +438,18 @@
           ],
           "default": null,
           "description": "Settings of auth: googleToken."
+        },
+        "webhook": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Webhook"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Settings of auth: webhook."
         },
         "vpcEgress": {
           "anyOf": [
@@ -1516,6 +1529,28 @@
         "subnetwork"
       ],
       "title": "VpcEgress",
+      "type": "object"
+    },
+    "Webhook": {
+      "additionalProperties": false,
+      "description": "Shared-secret gate of `cloudRun.auth: webhook`, checked by the container: Cloud Run's IAM check is off.",
+      "properties": {
+        "header": {
+          "default": "x-gitlab-token",
+          "description": "Request header carrying the shared secret (GitLab sends X-Gitlab-Token).",
+          "pattern": "^[A-Za-z0-9-]+$",
+          "title": "Header",
+          "type": "string"
+        },
+        "secret": {
+          "$ref": "#/$defs/SecretRef",
+          "description": "Secret Manager secret holding the expected value; the container gets it as AGENTLESS_WEBHOOK_SECRET and the runtime identity is granted access to it."
+        }
+      },
+      "required": [
+        "secret"
+      ],
+      "title": "Webhook",
       "type": "object"
     }
   },

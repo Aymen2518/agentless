@@ -68,6 +68,7 @@ def invoke(
 
     Every request carries a Google ID token: the service only answers callers holding roles/run.invoker. With
     auth: googleToken, `app_header` also carries `app_token` (default: that ID token) for the container's check.
+    With auth: webhook, pass `http` from webhook_session: the shared secret instead of a Google token.
     """
     http = http or id_token_session(credentials, url, app_header=app_header, app_token=app_token)
     base = url.rstrip("/")

@@ -178,6 +178,48 @@ class CloudRunClients(GcpClients):
             raise RuntimeError(f"GET {url} -> {response.status_code}: {response.text}")
         return response.json()
 
+    def webhook_probe(self, url: str, header: str) -> list[int]:
+        """Status codes of anonymous calls without the webhook secret and with a wrong one (auth: webhook).
+
+        No credentials are sent: this is what anyone on the internet gets. Retries while a new revision warms up.
+        """
+        import secrets as _secrets
+
+        import requests
+
+        audience(url)  # only ever probe a Cloud Run URL
+        statuses = []
+        for headers in ({}, {header: f"agentless-probe-{_secrets.token_hex(16)}"}):
+            for attempt in range(5):
+                try:
+                    response = requests.get(url, headers=headers, timeout=60, allow_redirects=False)
+                except requests.ConnectionError:
+                    status = 0
+                else:
+                    status = response.status_code
+                if status and status != 429 and status < 500:
+                    break
+                time.sleep(2**attempt)
+            statuses.append(status)
+        return statuses
+
+
+def webhook_session(url: str, header: str, token: str) -> Any:
+    """HTTP session for an auth: webhook service: the shared secret in `header`, no Google credentials."""
+    import requests
+
+    audience(url)  # the secret only goes to a Cloud Run URL
+
+    class _Session(requests.Session):
+        def rebuild_auth(self, prepared_request: Any, response: Any) -> None:
+            super().rebuild_auth(prepared_request, response)
+            if self.should_strip_auth(response.request.url, prepared_request.url):
+                prepared_request.headers.pop(header, None)
+
+    session = _Session()
+    session.headers[header] = token
+    return session
+
 
 def audience(url: str) -> str:
     """ID-token audience Cloud Run expects: the URL origin. Only Cloud Run URLs ever get a token."""

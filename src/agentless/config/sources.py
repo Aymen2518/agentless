@@ -104,6 +104,17 @@ def _load_document(path: Path) -> Any:
     return json.loads(text) if path.suffix == ".json" else yaml.safe_load(text)
 
 
+def read_secret(project: str, secret: str, version: str, deployer: Deployer) -> str:
+    """Value of a Secret Manager secret, by ID in `project` or by full `projects/…/secrets/…` name."""
+    name = secret if secret.startswith("projects/") else f"projects/{project}/secrets/{secret}"
+    if "/versions/" not in name:
+        name = f"{name}/versions/{version}"
+    try:
+        return _access_secret(name, deployer)
+    except Missing as e:
+        raise RuntimeError(str(e)) from None
+
+
 @functools.cache
 def _access_secret(name: str, deployer: Deployer) -> str:
     from google.api_core import exceptions

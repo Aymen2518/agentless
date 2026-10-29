@@ -259,6 +259,13 @@ class FakeGcp:
         self.ar_images[image] = digest
         return digest
 
+    # auth: webhook probe: what the container answers anonymous calls (set webhook_statuses to simulate a bad app)
+    webhook_statuses: tuple[int, int] = (401, 401)
+
+    def webhook_probe(self, url: str, header: str) -> list[int]:
+        self.calls.append(("webhook_probe", url, header))
+        return list(self.webhook_statuses)
+
     # A2A card served by an engine (url = the engine's A2A endpoint, as agents-cli's A2A app does)
     def a2a_card(self, url: str) -> dict[str, Any] | None:
         if ".run.app/" in url:

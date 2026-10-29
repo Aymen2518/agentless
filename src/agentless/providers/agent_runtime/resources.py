@@ -407,6 +407,8 @@ class IamResource(Resource):
         for res in roles.resources:
             out |= {(res.type, res.name, r, member) for r in res.roles}
         out |= {("secret", s.secret, "roles/secretmanager.secretAccessor", member) for s in cfg.agent.secrets.values()}
+        if cfg.cloud_run and cfg.cloud_run.webhook:
+            out.add(("secret", cfg.cloud_run.webhook.secret.secret, "roles/secretmanager.secretAccessor", member))
         if cfg.memory.artifacts_bucket:
             out.add(("bucket", cfg.memory.artifacts_bucket.removeprefix("gs://"), "roles/storage.objectUser", member))
         return out
