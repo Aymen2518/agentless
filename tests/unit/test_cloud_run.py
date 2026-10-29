@@ -830,6 +830,33 @@ def test_webhook_rejects_a_wrong_token_too(make_run, gcp: FakeGcp, edit) -> None
     assert _service(gcp)["invokerIamDisabled"] is False
 
 
+@pytest.mark.parametrize("error", [RuntimeError("probe crashed"), KeyboardInterrupt()])
+def test_webhook_fails_closed_when_the_probe_itself_fails(make_run, gcp: FakeGcp, edit, error) -> None:
+    edit(_webhook)
+
+    def broken(_url: str, _header: str) -> list[int]:
+        raise error
+
+    gcp.webhook_probe = broken  # type: ignore[method-assign]
+    with pytest.raises(type(error)):
+        deploy(make_run())
+    assert _service(gcp)["invokerIamDisabled"] is False
+
+
+def test_webhook_probe_timeouts_count_as_not_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    import requests
+
+    from agentless.providers.cloud_run.clients import CloudRunClients
+
+    def timeout(*_a, **_k):
+        raise requests.ReadTimeout("slow")
+
+    monkeypatch.setattr(requests, "get", timeout)
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    statuses = CloudRunClients.webhook_probe(object.__new__(CloudRunClients), URL, "x-gitlab-token")  # type: ignore[arg-type]
+    assert statuses == [0, 0]
+
+
 def test_switching_from_webhook_back_to_iam_turns_the_check_back_on(make_run, gcp: FakeGcp, edit) -> None:
     edit(_webhook)
     deploy(make_run())

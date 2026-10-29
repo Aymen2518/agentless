@@ -408,7 +408,11 @@ class ServiceResource(Resource):
         header = run_spec.webhook_header(ctx.project)
         if not header:
             return
-        statuses = ctx.clients.webhook_probe(url, header)
+        try:
+            statuses = ctx.clients.webhook_probe(url, header)
+        except BaseException:  # a failed or interrupted probe proves nothing: close the service, then re-raise
+            ctx.clients.run_service_update(name, {**body, "invokerIamDisabled": False})
+            raise
         if all(status in (401, 403) for status in statuses):
             ctx.echo(f"    anonymous calls refused ({', '.join(map(str, statuses))}); {header} gates the service")
             return

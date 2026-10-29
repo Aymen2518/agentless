@@ -601,7 +601,7 @@ def invoke(
             message,
             user_id=user,
             session_id=session,
-            credentials=project.deployer.credentials(),
+            credentials=None if webhook else project.deployer.credentials(),
             app_header=run_spec.app_token_header(project),
             app_token=app_token,
             http=http,

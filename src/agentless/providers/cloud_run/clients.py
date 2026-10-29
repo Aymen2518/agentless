@@ -193,7 +193,7 @@ class CloudRunClients(GcpClients):
             for attempt in range(5):
                 try:
                     response = requests.get(url, headers=headers, timeout=60, allow_redirects=False)
-                except requests.ConnectionError:
+                except requests.RequestException:  # timeouts too: anything but an answer counts as not refused
                     status = 0
                 else:
                     status = response.status_code
