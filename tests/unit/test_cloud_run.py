@@ -550,3 +550,224 @@ def test_remove_with_a_session_engine_is_complete(make_run, gcp: FakeGcp, edit) 
     deploy(make_run())
     assert make_run().remove(lambda _: True)
     assert not gcp.engines and make_run().store.read() is None
+
+
+# --- auth: googleToken -----------------------------------------------------------------------------------------------
+
+_GOOGLE_TOKEN = {"auth": "googleToken", "googleToken": {"allowedPrincipals": ["ops@acme.com", "domain:acme.com"]}}
+
+
+def _google_token(data: dict) -> None:
+    data["cloudRun"] = {**_GOOGLE_TOKEN}
+    data["access"] = {"invokers": ["domain:acme.com"]}
+
+
+def test_google_token_keeps_the_iam_check_and_passes_the_app_settings(make_run, gcp: FakeGcp, edit) -> None:
+    edit(_google_token)
+    _, changeset = make_run().plan(DeployOptions())
+    service = next(c for c in changeset.changes if c.resource == "service")
+    assert any("container must verify the Google token in x-google-token" in d for d in service.details)
+    deploy(make_run())
+
+    assert _service(gcp)["invokerIamDisabled"] is False
+    env = _env(gcp)
+    assert env["AGENTLESS_AUTH_MODE"] == "googleToken"
+    assert env["AGENTLESS_TOKEN_HEADER"] == "x-google-token"
+    assert env["AGENTLESS_TOKEN_AUDIENCES"] == URL
+    assert env["AGENTLESS_ALLOWED_PRINCIPALS"] == "ops@acme.com,domain:acme.com"
+    members = gcp.iam_members("runService", SERVICE) or {}
+    assert members.get("roles/run.invoker") == {"domain:acme.com"}
+    assert not {"allUsers", "allAuthenticatedUsers"} & {m for ms in members.values() for m in ms}
+
+
+def test_switching_auth_mode_only_updates_the_service_env(make_run, gcp: FakeGcp, edit) -> None:
+    deploy(make_run())
+    assert "AGENTLESS_AUTH_MODE" not in _env(gcp)
+    builds = gcp.kinds().count("build")
+    edit(_google_token)
+    assert actions(make_run())["service"] == Action.UPDATE
+    deploy(make_run())
+    assert _env(gcp)["AGENTLESS_AUTH_MODE"] == "googleToken"
+    edit(lambda d: d.update(cloudRun={}))
+    deploy(make_run())
+    assert not any(k.startswith("AGENTLESS_") for k in _env(gcp))
+    assert gcp.kinds().count("build") == builds  # config only, never a rebuild
+
+
+def test_google_token_header_and_audiences_reach_the_container(make_run, gcp: FakeGcp, edit) -> None:
+    def change(d: dict) -> None:
+        _google_token(d)
+        d["cloudRun"]["googleToken"] |= {"header": "X-App-Token", "audiences": ["https://agent.acme.com"]}
+
+    edit(change)
+    deploy(make_run())
+    env = _env(gcp)
+    assert env["AGENTLESS_TOKEN_HEADER"] == "x-app-token"
+    assert env["AGENTLESS_TOKEN_AUDIENCES"] == "https://agent.acme.com"
+
+
+@pytest.mark.parametrize("block", ["environment", "secrets"])
+def test_agent_env_cannot_set_the_google_token_settings(run_dir: Path, edit, block: str) -> None:
+    def change(d: dict) -> None:
+        _google_token(d)
+        d["agent"][block] = {"AGENTLESS_ALLOWED_PRINCIPALS": "*" if block == "environment" else {"secret": "s"}}
+
+    edit(change)
+    with pytest.raises(ConfigError, match="AGENTLESS_ALLOWED_PRINCIPALS are set by cloudRun.auth: googleToken"):
+        _load(run_dir)
+
+
+def test_principals_are_lowercased(run_dir: Path, edit) -> None:
+    edit(lambda d: d.update(cloudRun={"auth": "googleToken", "googleToken": {"allowedPrincipals": ["Ops@Acme.com"]}}))
+    run = _load(run_dir).config.cloud_run
+    assert run and run.google_token and run.google_token.allowed_principals == ["ops@acme.com"]
+
+
+def test_deployer_outside_the_allowed_principals_warns(make_run, edit) -> None:
+    def change(d: dict) -> None:
+        _google_token(d)
+        d["provider"]["deployer"] = {"impersonate": "ci@proj-dev.iam.gserviceaccount.com"}
+
+    edit(change)
+    _, changeset = make_run().plan(DeployOptions())
+    service = next(c for c in changeset.changes if c.resource == "service")
+    assert any("deployer ci@proj-dev.iam.gserviceaccount.com is not in" in d for d in service.details)
+
+
+def test_no_invokers_with_google_token_warns(make_run, edit) -> None:
+    edit(lambda d: d.update(cloudRun={**_GOOGLE_TOKEN}))
+    _, changeset = make_run().plan(DeployOptions())
+    service = next(c for c in changeset.changes if c.resource == "service")
+    assert any("only the deployer passes the IAM check" in d for d in service.details)
+
+
+@pytest.mark.parametrize(
+    ("cloud_run", "message"),
+    [
+        ({"auth": "googleToken"}, "needs cloudRun.googleToken.allowedPrincipals"),
+        ({**_GOOGLE_TOKEN, "iap": True}, "exclusive"),
+        ({**_GOOGLE_TOKEN, "ingress": "internal"}, "use ingress all"),
+        ({"googleToken": {"allowedPrincipals": ["ops@acme.com"]}}, "only valid with auth: googleToken"),
+        ({"auth": "googleToken", "googleToken": {"allowedPrincipals": []}}, "at least 1"),
+        ({"auth": "googleToken", "googleToken": {"allowedPrincipals": ["allUsers"]}}, "invalid principal"),
+        (
+            {"auth": "googleToken", "googleToken": {"header": "Authorization", "allowedPrincipals": ["a@b.co"]}},
+            "reserved by HTTP, Cloud Run or IAP",
+        ),
+        (
+            {
+                "auth": "googleToken",
+                "googleToken": {"header": "X-Serverless-Authorization", "allowedPrincipals": ["a@b.co"]},
+            },
+            "reserved by HTTP, Cloud Run or IAP",
+        ),
+        (
+            {"auth": "googleToken", "googleToken": {"header": "Host", "allowedPrincipals": ["a@b.co"]}},
+            "reserved",
+        ),
+        (
+            {
+                "auth": "googleToken",
+                "googleToken": {"header": "X-Goog-Authenticated-User", "allowedPrincipals": ["a@b.co"]},
+            },
+            "reserved",
+        ),
+        (
+            {"auth": "googleToken", "googleToken": {"header": "Content-Type", "allowedPrincipals": ["a@b.co"]}},
+            "reserved",
+        ),
+        ({"auth": "googleToken", "googleToken": {"allowedPrincipals": ["a@b.co,c@d.co"]}}, "invalid principal"),
+        ({"auth": "googleToken", "googleToken": {"allowedPrincipals": ["a@b.co"], "audiences": [""]}}, "audience"),
+        (
+            {"auth": "googleToken", "googleToken": {"allowedPrincipals": ["a@b.co"], "audiences": ["a,b"]}},
+            "audience",
+        ),
+        ({"auth": "public"}, "auth"),
+    ],
+)
+def test_google_token_settings_are_validated(run_dir: Path, edit, cloud_run: dict, message: str) -> None:
+    edit(lambda d: d.update(cloudRun=cloud_run))
+    with pytest.raises(ConfigError, match=message):
+        _load(run_dir)
+
+
+def test_google_token_session_uses_the_serverless_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    from google.oauth2 import id_token
+
+    from agentless.providers.cloud_run.clients import id_token_session
+
+    audiences: list[str] = []
+    monkeypatch.setattr(id_token, "fetch_id_token", lambda _req, aud: audiences.append(aud) or "tok")
+
+    plain = id_token_session(object(), URL)
+    assert plain.headers["Authorization"] == "Bearer tok"
+
+    both = id_token_session(object(), f"{URL}/run_sse", app_header="x-google-token")
+    assert both.headers["X-Serverless-Authorization"] == "Bearer tok"
+    assert both.headers["x-google-token"] == "tok"
+    assert "Authorization" not in both.headers  # left for the app, never filled by agentless
+
+    custom = id_token_session(object(), URL, app_header="x-google-token", app_token="user-tok")
+    assert custom.headers["X-Serverless-Authorization"] == "Bearer tok"
+    assert custom.headers["x-google-token"] == "user-tok"
+    assert audiences == [URL] * 3
+
+
+def test_google_token_session_with_a_service_account_key() -> None:
+    from agentless.providers.cloud_run.clients import id_token_session
+
+    class Minted:
+        token = None
+
+        def refresh(self, _request) -> None:
+            self.token = "sa-tok"
+
+    class Key:
+        def __init__(self) -> None:
+            self.audiences: list[str] = []
+
+        def with_target_audience(self, aud: str) -> Minted:
+            self.audiences.append(aud)
+            return Minted()
+
+    key = Key()
+    session = id_token_session(key, URL, app_header="x-google-token")
+    assert key.audiences == [URL]
+    assert session.headers["X-Serverless-Authorization"] == "Bearer sa-tok"
+    assert session.headers["x-google-token"] == "sa-tok"
+
+
+def test_app_token_needs_google_token_auth(fake_cli: Path, edit) -> None:
+    from typer.testing import CliRunner
+
+    from agentless import cli
+
+    edit(_cloud_run)
+    _scaffold_for_cloud_run(fake_cli)
+    result = CliRunner().invoke(cli.app, ["invoke", "-c", str(fake_cli / "agent.yaml"), "-m", "hi", "--app-token", "t"])
+    assert result.exit_code == 1 and "only applies to Cloud Run agents with cloudRun.auth: googleToken" in result.output
+
+
+@pytest.mark.parametrize("app_header", [None, "x-google-token"])
+def test_token_headers_are_dropped_on_a_cross_host_redirect(monkeypatch: pytest.MonkeyPatch, app_header) -> None:
+    import requests
+    from google.oauth2 import id_token
+
+    from agentless.providers.cloud_run.clients import id_token_session
+
+    monkeypatch.setattr(id_token, "fetch_id_token", lambda _req, _aud: "tok")
+    session = id_token_session(object(), URL, app_header=app_header)
+
+    def redirected(target: str) -> requests.PreparedRequest:
+        original = requests.Request("GET", f"{URL}/run_sse", headers=dict(session.headers)).prepare()
+        response = requests.Response()
+        response.request = original
+        follow = original.copy()
+        follow.url = target
+        session.rebuild_auth(follow, response)
+        return follow
+
+    leaked = redirected("https://evil.example.com/")
+    assert not {"Authorization", "X-Serverless-Authorization", "x-google-token"} & set(leaked.headers)
+    kept = {"X-Serverless-Authorization", "x-google-token"} if app_header else {"Authorization"}
+    assert kept <= set(redirected(f"{URL}/other").headers)

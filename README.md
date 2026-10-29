@@ -518,6 +518,86 @@ access:
   account key's, the metadata server's, or the one your `gcloud auth application-default login` refresh returns.
   They never fall back to anonymous requests.
 
+**Public endpoint with a second check (`cloudRun.auth: googleToken`).** For callers outside your network, keep
+`ingress: all` and add an app-level check on top of IAM, never instead of it:
+
+```yaml
+cloudRun:
+  auth: googleToken
+  googleToken:
+    header: x-google-token                       # default
+    allowedPrincipals: [ops@acme.com, domain:acme.com]
+    # audiences: [https://agent.acme.com]        # default: the service URL
+access:
+  invokers: [domain:acme.com]                    # layer 1: roles/run.invoker, still required
+```
+
+- **Layer 1, Cloud Run IAM:** the invoker check stays on and `allUsers` is still rejected. Callers send their ID
+  token in `X-Serverless-Authorization`, which Cloud Run checks, so `Authorization` stays free for the app.
+  Anonymous requests get a 403 before they reach the container.
+- **Layer 2, the container:** it gets `AGENTLESS_AUTH_MODE`, `AGENTLESS_TOKEN_HEADER`, `AGENTLESS_TOKEN_AUDIENCES`
+  and `AGENTLESS_ALLOWED_PRINCIPALS`, and must verify the Google token in that header. Setting these names in
+  `agent.environment` or `agent.secrets` is rejected. agentless can't enforce this layer: if the container doesn't
+  verify the token, only layer 1 applies.
+- **agentless's own calls** (`invoke`, agent card) send the ID token in both headers, and drop both on a redirect
+  to another host. `invoke --app-token` sends another token in the app header. List the deployer in
+  `allowedPrincipals`: `plan` warns when the impersonated deployer isn't covered.
+- With `gcloud auth application-default login`, your ID token's `aud` is the gcloud OAuth client, not the service
+  URL. Impersonate a service account, or add that client to `googleToken.audiences`.
+- Gemini Enterprise calls with an ID token only: `plan` warns, and the container has to accept those calls.
+- **`x-google-token` reaching the container hasn't been verified live.** Google's front end strips some
+  `X-Google-*` headers on other serverless products. Check with a service that echoes its headers, or pick
+  another `googleToken.header` (`x-goog-*`, `x-cloud-*`, `x-forwarded-*`, `content-*`, `host` and `cookie` are
+  rejected).
+- `googleToken` can't be combined with `iap: true` (IAP already checks the caller) or `ingress: internal`.
+
+The check in an agents-cli FastAPI app (`app/fast_api_app.py`, needs `cachecontrol`):
+
+```python
+import os
+
+import cachecontrol
+import requests
+from fastapi import Request
+from fastapi.responses import JSONResponse
+from google.auth.transport import requests as google_requests
+from google.oauth2 import id_token
+from starlette.concurrency import run_in_threadpool
+
+HEADER = os.environ.get("AGENTLESS_TOKEN_HEADER")
+AUDIENCES = os.environ.get("AGENTLESS_TOKEN_AUDIENCES", "").split(",")
+ALLOWED = set(os.environ.get("AGENTLESS_ALLOWED_PRINCIPALS", "").split(","))
+# Google's signing certs are cached between requests instead of fetched on each one
+_transport = google_requests.Request(session=cachecontrol.CacheControl(requests.Session()))
+
+
+def _allowed(claims: dict) -> bool:
+    if not claims.get("email_verified"):
+        return False
+    email = claims.get("email", "")
+    if email in ALLOWED:
+        return True
+    domain = email.rpartition("@")[2]
+    # Workspace users: the `hd` claim proves the account belongs to the domain. Service accounts carry no `hd`.
+    if claims.get("hd") == domain or domain.endswith(".gserviceaccount.com"):
+        return f"domain:{domain}" in ALLOWED
+    return False
+
+
+@app.middleware("http")
+async def verify_google_token(request: Request, call_next):
+    # The agent card stays behind Cloud Run IAM (layer 1) but needs no app token, so publishing can read it.
+    if HEADER and not request.url.path.endswith("/.well-known/agent-card.json"):
+        token = request.headers.get(HEADER, "").removeprefix("Bearer ").strip()
+        try:
+            claims = await run_in_threadpool(id_token.verify_oauth2_token, token, _transport, AUDIENCES)
+        except ValueError:
+            return JSONResponse({"error": "invalid token"}, status_code=401)
+        if not _allowed(claims):
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+    return await call_next(request)
+```
+
 **Not supported on Cloud Run yet:** `eval`, `evaluation.afterDeploy`, `evaluation.monitors`, `deploy --no-wait` /
 `--status`, PSC-I (use `cloudRun.vpcEgress`), `agent.runtime.serverMode`, and `identity.type` other than
 `serviceAccount`. Each one fails validation or the command with a clear message.

@@ -97,6 +97,71 @@ class VpcEgress(_Model):
     egress: Literal["private-ranges-only", "all-traffic"] = "private-ranges-only"
 
 
+_RESERVED_HEADERS = (
+    "authorization",
+    "proxy-authorization",
+    "x-serverless-authorization",
+    "host",
+    "cookie",
+    "forwarded",
+    "connection",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+)
+_RESERVED_HEADER_PREFIXES = ("x-goog-", "x-cloud-", "x-forwarded-", "content-")
+_PRINCIPAL_RE = re.compile(r"^(domain:[a-z0-9.-]+\.[a-z]{2,}|[^@\s:,]+@[^@\s:,]+\.[a-z]{2,})$")
+AUTH_ENV = (
+    "AGENTLESS_AUTH_MODE",
+    "AGENTLESS_TOKEN_HEADER",
+    "AGENTLESS_TOKEN_AUDIENCES",
+    "AGENTLESS_ALLOWED_PRINCIPALS",
+)
+
+
+class GoogleToken(_Model):
+    """Second check of `cloudRun.auth: googleToken`, done by the container: agentless only passes these settings."""
+
+    header: str = Field(
+        default="x-google-token",
+        pattern=r"^[A-Za-z0-9-]+$",
+        description="Request header carrying the caller's Google ID token for the app to verify.",
+    )
+    audiences: list[str] = Field(
+        default_factory=list, description="Accepted `aud` values of that token; defaults to the service URL."
+    )
+    allowed_principals: list[str] = Field(
+        min_length=1,
+        description="Who the container accepts: emails (users or service accounts) or domain:<domain>.",
+    )
+
+    @field_validator("header")
+    @classmethod
+    def _header(cls, v: str) -> str:
+        v = v.lower()
+        if v in _RESERVED_HEADERS or v.startswith(_RESERVED_HEADER_PREFIXES):
+            raise ValueError(f"{v} is reserved by HTTP, Cloud Run or IAP; pick another header (default x-google-token)")
+        return v
+
+    @field_validator("audiences")
+    @classmethod
+    def _audiences(cls, v: list[str]) -> list[str]:
+        for aud in v:
+            if not aud.strip() or "," in aud or aud != aud.strip():
+                raise ValueError(f"invalid audience {aud!r} (a URL or OAuth client ID, without commas)")
+        return v
+
+    @field_validator("allowed_principals")
+    @classmethod
+    def _principals(cls, v: list[str]) -> list[str]:
+        v = [p.lower() for p in v]  # token emails are lowercase
+        for principal in v:
+            if not _PRINCIPAL_RE.match(principal):
+                raise ValueError(f"invalid principal {principal!r} (expected an email or domain:<domain>)")
+        return v
+
+
 class CloudRun(_Model):
     """Cloud Run service settings (provider.name: cloud-run); callers always need roles/run.invoker, never public."""
 
@@ -119,6 +184,13 @@ class CloudRun(_Model):
         description="Network sources allowed to reach the service. IAM still applies to every request.",
     )
     iap: bool = Field(default=False, description="Put Identity-Aware Proxy in front of the service.")
+    auth: Literal["iam", "googleToken"] = Field(
+        default="iam",
+        description="iam: Cloud Run checks the caller's ID token (Authorization). googleToken: Cloud Run still "
+        "checks it, sent as X-Serverless-Authorization, and the container also verifies the Google token in "
+        "googleToken.header. The invoker IAM check is never turned off.",
+    )
+    google_token: GoogleToken | None = Field(default=None, description="Settings of auth: googleToken.")
     vpc_egress: VpcEgress | None = None
     timeout: str = Field(default="300s", pattern=r"^\d+s$", description="Request timeout, at most 3600s.")
     cpu_throttling: bool = Field(default=False, description="Only allocate CPU during requests.")
@@ -136,6 +208,19 @@ class CloudRun(_Model):
     @classmethod
     def _sa(cls, v: str | None) -> str | None:
         return check_service_account(v) if v else v
+
+    @model_validator(mode="after")
+    def _auth(self) -> CloudRun:
+        if self.auth == "googleToken":
+            if self.google_token is None:
+                raise ValueError("auth googleToken needs cloudRun.googleToken.allowedPrincipals")
+            if self.iap:
+                raise ValueError("auth googleToken and iap are exclusive: IAP already verifies the caller")
+            if self.ingress == "internal":
+                raise ValueError("auth googleToken is for callers outside the VPC; use ingress all")
+        elif self.google_token is not None:
+            raise ValueError("cloudRun.googleToken is only valid with auth: googleToken")
+        return self
 
 
 class Source(_Model):
@@ -671,6 +756,9 @@ class AgentConfig(_Model):
                 "building the source needs provider.stagingBucket (or set cloudRun.image)",
             ),
         ]
+        if self.cloud_run.auth == "googleToken":
+            reserved = sorted((set(self.agent.environment) | set(self.agent.secrets)) & set(AUTH_ENV))
+            unsupported.append((bool(reserved), f"{', '.join(reserved)} are set by cloudRun.auth: googleToken"))
         problems = [message for failed, message in unsupported if failed]
         if problems:
             raise ValueError("provider cloud-run: " + "; ".join(problems))

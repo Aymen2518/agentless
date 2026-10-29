@@ -274,14 +274,34 @@ class ServiceResource(Resource):
     @staticmethod
     def _notes(ctx: Context) -> list[str]:
         cfg = ctx.project.config
+        notes: list[str] = []
         if cfg.publish.gemini_enterprise and cfg.cloud_run and cfg.cloud_run.ingress != "all":
-            return [
-                (
-                    f"! ingress {cfg.cloud_run.ingress}: Gemini Enterprise calls the agent from outside your VPC and "
-                    "may not reach it; use ingress all (IAM still applies) or route it through a load balancer"
+            notes.append(
+                f"! ingress {cfg.cloud_run.ingress}: Gemini Enterprise calls the agent from outside your VPC and "
+                "may not reach it; use ingress all (IAM still applies) or route it through a load balancer"
+            )
+        if header := run_spec.app_token_header(ctx.project):
+            assert cfg.cloud_run and cfg.cloud_run.google_token
+            principals = ", ".join(cfg.cloud_run.google_token.allowed_principals)
+            notes.append(
+                f"= auth googleToken: Cloud Run checks roles/run.invoker (X-Serverless-Authorization), then the "
+                f"container must verify the Google token in {header} (allowed: {principals})"
+            )
+            if not cfg.access.invokers:
+                notes.append("! no access.invokers: only the deployer passes the IAM check")
+            deployer = (ctx.project.deployer.impersonate or "").lower()
+            allowed = cfg.cloud_run.google_token.allowed_principals
+            if deployer and deployer not in allowed and f"domain:{deployer.rpartition('@')[2]}" not in allowed:
+                notes.append(
+                    f"! deployer {deployer} is not in googleToken.allowedPrincipals: `invoke` and agent card reads "
+                    "will be refused unless the container exempts them"
                 )
-            ]
-        return []
+            if cfg.publish.gemini_enterprise:
+                notes.append(
+                    f"! Gemini Enterprise calls the agent with an ID token only, without {header}: the container "
+                    "must accept it (its service agent holds roles/run.invoker) or GE calls will be refused"
+                )
+        return notes
 
     def _code_changed(self, ctx: Context, st: dict[str, Any]) -> bool:
         run = ctx.project.config.cloud_run

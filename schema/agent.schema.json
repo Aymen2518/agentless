@@ -416,6 +416,28 @@
           "title": "Iap",
           "type": "boolean"
         },
+        "auth": {
+          "default": "iam",
+          "description": "iam: Cloud Run checks the caller's ID token (Authorization). googleToken: Cloud Run still checks it, sent as X-Serverless-Authorization, and the container also verifies the Google token in googleToken.header. The invoker IAM check is never turned off.",
+          "enum": [
+            "iam",
+            "googleToken"
+          ],
+          "title": "Auth",
+          "type": "string"
+        },
+        "googleToken": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GoogleToken"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Settings of auth: googleToken."
+        },
         "vpcEgress": {
           "anyOf": [
             {
@@ -767,6 +789,41 @@
         "app"
       ],
       "title": "GeminiEnterprise",
+      "type": "object"
+    },
+    "GoogleToken": {
+      "additionalProperties": false,
+      "description": "Second check of `cloudRun.auth: googleToken`, done by the container: agentless only passes these settings.",
+      "properties": {
+        "header": {
+          "default": "x-google-token",
+          "description": "Request header carrying the caller's Google ID token for the app to verify.",
+          "pattern": "^[A-Za-z0-9-]+$",
+          "title": "Header",
+          "type": "string"
+        },
+        "audiences": {
+          "description": "Accepted `aud` values of that token; defaults to the service URL.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Audiences",
+          "type": "array"
+        },
+        "allowedPrincipals": {
+          "description": "Who the container accepts: emails (users or service accounts) or domain:<domain>.",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Allowedprincipals",
+          "type": "array"
+        }
+      },
+      "required": [
+        "allowedPrincipals"
+      ],
+      "title": "GoogleToken",
       "type": "object"
     },
     "Identity": {

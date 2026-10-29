@@ -24,6 +24,12 @@ User docs: README "Cloud Run target", `examples/cloud-run.yaml`.
    - Services are always sent with `invokerIamDisabled: false`; a check disabled outside agentless is turned back on.
    - A public grant made outside agentless blocks plan and deploy.
    - `ingress: internal` adds to IAM, never replaces it.
+   - `auth: googleToken` (2026-10-29): the user wanted a public endpoint that keeps an IAM layer. Cloud Run IAM
+     stays on, and callers send the ID token in `X-Serverless-Authorization`. The container verifies the token in
+     `googleToken.header` against `AGENTLESS_ALLOWED_PRINCIPALS` / `AGENTLESS_TOKEN_AUDIENCES`
+     (`spec.auth_env`; the loader rejects these names in `agent.environment` and `agent.secrets`). `id_token_session(app_header=…)` sends both headers,
+     and `CloudRunClients.app_token_header` makes agent card reads do the same. `TokenSession.rebuild_auth` drops both headers on a cross-host redirect (requests only strips `Authorization`). Exclusive with `iap` and
+     `ingress: internal`.
 4. **v1 scope:** invokers, GE (A2A only), Agent Registry, Direct VPC egress, ingress, IAP.
 
 ## Resource notes
@@ -82,6 +88,9 @@ User docs: README "Cloud Run target", `examples/cloud-run.yaml`.
 - An anonymous request to the service returns 403.
 
 ## Not verified against live APIs
+- `auth: googleToken`: that Cloud Run accepts `X-Serverless-Authorization` from user and impersonated tokens and
+  forwards the custom `x-google-token` header unchanged (the docs don't list `X-Google-*` as reserved). Check it
+  with a header-echo service before relying on it.
 - Direct IAP (`iapEnabled` plus `launchStage: BETA`), Direct VPC egress, and `--code-only` (output-only fields left in
   the body).
 - Gemini Enterprise A2A registration of a Cloud Run card URL, the Agent Registry, and GE's service agent calling the

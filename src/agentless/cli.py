@@ -26,6 +26,7 @@ from agentless.providers.agent_runtime import evals, ops
 from agentless.providers.agent_runtime.provider import AgentRuntimeProvider, DeployError
 from agentless.providers.base import BaseProvider
 from agentless.providers.cloud_run import ops as run_ops
+from agentless.providers.cloud_run import spec as run_spec
 from agentless.providers.cloud_run.provider import CloudRunProvider
 from agentless.state.store import StateError
 
@@ -567,12 +568,20 @@ def invoke(
     session: Annotated[str | None, typer.Option(help="Reuse a session id.")] = None,
     user: Annotated[str, typer.Option(help="User id for the session.")] = "agentless-cli",
     raw: Annotated[bool, typer.Option(help="Print raw ADK events as JSON lines.")] = False,
+    app_token: Annotated[
+        str | None,
+        typer.Option(
+            help="Cloud Run auth googleToken: token sent in cloudRun.googleToken.header (default: your ID token)."
+        ),
+    ] = None,
     impersonate: ImpersonateOpt = None,
 ) -> None:
     """Send a message to the deployed agent and stream its answer."""
     project, pm = _load(config, stage, param, impersonate)
     cfg = project.config
     provider = _provider(project, pm)
+    if app_token and not run_spec.app_token_header(project):
+        raise ConfigError("--app-token only applies to Cloud Run agents with cloudRun.auth: googleToken")
     if _on_cloud_run(project):
         _service_name(provider)
         events = run_ops.invoke(
@@ -582,6 +591,8 @@ def invoke(
             user_id=user,
             session_id=session,
             credentials=project.deployer.credentials(),
+            app_header=run_spec.app_token_header(project),
+            app_token=app_token,
         )
     else:
         events = ops.invoke(

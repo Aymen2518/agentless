@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+- **Public Cloud Run endpoint with two checks, `cloudRun.auth: googleToken`.** The service stays behind Cloud Run
+  IAM: the invoker check is never turned off and `allUsers` is still rejected. Callers send their ID token in
+  `X-Serverless-Authorization`, and the container also verifies the Google token in `cloudRun.googleToken.header`
+  (default `x-google-token`) against `allowedPrincipals` and `audiences`, passed as `AGENTLESS_*` env vars.
+  `invoke` and agent card reads send both headers, and `invoke --app-token` overrides the app token. The README
+  has the FastAPI middleware.
+
 ## [0.8.0] - 2026-10-29
 
 ### Security

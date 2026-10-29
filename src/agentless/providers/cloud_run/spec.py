@@ -43,6 +43,29 @@ def image_uri(project: Project, tag: str) -> str:
     )
 
 
+def app_token_header(project: Project) -> str | None:
+    """Header the container reads the caller's Google token from (auth: googleToken), else None."""
+    run = project.config.cloud_run
+    return run.google_token.header if run and run.auth == "googleToken" and run.google_token else None
+
+
+def auth_env(project: Project, url: str) -> dict[str, str]:
+    """Settings the container needs to verify the Google token itself; empty with auth: iam.
+
+    They override agent.env: the check is part of the deployment, not something an env var may loosen.
+    """
+    run = project.config.cloud_run
+    if not run or run.auth != "googleToken" or not run.google_token:
+        return {}
+    token = run.google_token
+    return {
+        "AGENTLESS_AUTH_MODE": "googleToken",
+        "AGENTLESS_TOKEN_HEADER": token.header,
+        "AGENTLESS_TOKEN_AUDIENCES": ",".join(token.audiences or [url]),
+        "AGENTLESS_ALLOWED_PRINCIPALS": ",".join(token.allowed_principals),
+    }
+
+
 def desired_spec(
     project: Project, *, service_account: str | None, url: str, session_engine: str | None
 ) -> dict[str, Any]:
@@ -64,6 +87,7 @@ def desired_spec(
     if session_engine:
         env.setdefault("GOOGLE_CLOUD_AGENT_ENGINE_ID", session_engine.rsplit("/", 1)[-1])
         env.setdefault("GOOGLE_CLOUD_AGENT_ENGINE_LOCATION", cfg.provider.region)
+    env |= auth_env(project, url)
     vpc = run.vpc_egress
     return {
         "labels": dict(

@@ -51,6 +51,9 @@ safely.
     and there is no `allowUnauthenticated` switch. Cloud Run services always go out with `invokerIamDisabled: false`;
     `InvokerResource` blocks on a public grant made outside agentless (it never revokes it, see invariant 2).
     agentless's own calls to a service use an ID token and never fall back to anonymous requests.
+    `cloudRun.auth: googleToken` ("public" for callers outside the VPC) adds an app-level check *on top of* IAM:
+    the ID token moves to `X-Serverless-Authorization`, and the container verifies the token in its own header.
+    It never relaxes this invariant.
 11. **Engine updates are minimal.** Config fields go out with an `update_mask` built by `spec.api_payload`. Code
     (`source_code_spec`) is only sent when the source hash or the build args change. Fields fixed at creation
     (`IMMUTABLE_FIELDS`) force a blocked REPLACE unless `--allow-replace`. On a never-deployed engine (bare or
