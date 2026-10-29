@@ -22,7 +22,7 @@ from agentless.config.sources import read_secret
 from agentless.hooks import plugin_manager, variable_sources
 from agentless.package.packager import PackageError, write_archive
 from agentless.plan.model import Action, ChangeSet, DeployOptions
-from agentless.plan.render import render
+from agentless.plan.render import render, use_color
 from agentless.providers.agent_runtime import evals, ops
 from agentless.providers.agent_runtime.provider import AgentRuntimeProvider, DeployError
 from agentless.providers.base import BaseProvider
@@ -37,6 +37,22 @@ app = typer.Typer(
     no_args_is_help=True,
     pretty_exceptions_enable=False,
 )
+
+
+@app.callback()
+def _root(
+    ctx: typer.Context,
+    color: Annotated[
+        bool | None,
+        typer.Option(
+            "--color/--no-color",
+            help="Colour the output. Default: on in a terminal and in CI (GitLab, GitHub), off with NO_COLOR.",
+        ),
+    ] = None,
+) -> None:
+    """Deploy ADK agents to Google Cloud Agent Platform from a declarative agent.yaml."""
+    ctx.color = use_color(color)  # every subcommand's echo inherits it
+
 
 ConfigOpt = Annotated[Path, typer.Option("--config", "-c", help="Path to agent.yaml.")]
 StageOpt = Annotated[str | None, typer.Option("--stage", "-s", help="Stage to target (default: provider.stage).")]

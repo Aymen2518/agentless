@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+- **Plan colours like Terraform.** Detail lines now take the colour of their marker: green `+` added, yellow `~`
+  changed, red `-` removed, so a dropped env var or revoked binding inside an update stands out. Replaces are
+  red (destroy then recreate), `!` warnings bold yellow, and each count of the `Plan:` line is coloured.
+- **Colours in CI logs.** Click stripped them when the output wasn't a terminal. They're now on in CI (`CI`,
+  `GITLAB_CI`, `GITHUB_ACTIONS`…) and with `FORCE_COLOR` / `CLICOLOR_FORCE`, off with `NO_COLOR`, and
+  `agentless --color` / `--no-color` overrides them.
+
 ## [0.10.0] - 2026-10-29
 
 ### Added

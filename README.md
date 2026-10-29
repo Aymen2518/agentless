@@ -695,6 +695,12 @@ memories) and the uploaded sources. Built images stay in the registry.
 Common options: `-c/--config`, `-s/--stage`, `-p/--param key=value`, `--impersonate-service-account SA_EMAIL` (see
 [Deploying as a service account](#deploying-as-a-service-account)).
 
+**Plan colours** follow Terraform: green `+` for what is created or added, yellow `~` for what changes, red `-`
+and `±` for what is deleted or replaced. Detail lines (an env var, an IAM binding) take the colour of their marker,
+`!` warnings are bold yellow and no-ops are dim. Colours are on in a terminal and in CI (GitLab, GitHub and others
+render them in job logs), off with `NO_COLOR`, forced with `FORCE_COLOR`. `agentless --color` / `--no-color`
+(before the command) overrides all of these.
+
 Without a TTY (CI), `deploy` applies without asking, like `serverless deploy`. With a TTY it asks unless you pass
 `-y`; destructive plans default to "no".
 
