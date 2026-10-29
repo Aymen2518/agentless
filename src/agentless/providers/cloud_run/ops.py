@@ -60,13 +60,16 @@ def invoke(
     user_id: str,
     session_id: str | None,
     credentials: Any,
+    app_header: str | None = None,
+    app_token: str | None = None,
     http: Any = None,
 ) -> Iterator[dict[str, Any]]:
     """Stream ADK events from the agent's `/run_sse`, creating a session when none is given.
 
-    Every request carries a Google ID token: the service only answers callers holding roles/run.invoker.
+    Every request carries a Google ID token: the service only answers callers holding roles/run.invoker. With
+    auth: googleToken, `app_header` also carries `app_token` (default: that ID token) for the container's check.
     """
-    http = http or id_token_session(credentials, url)
+    http = http or id_token_session(credentials, url, app_header=app_header, app_token=app_token)
     base = url.rstrip("/")
     if not session_id:
         resp = http.post(f"{base}/apps/{app_name}/users/{user_id}/sessions", json={}, timeout=60)

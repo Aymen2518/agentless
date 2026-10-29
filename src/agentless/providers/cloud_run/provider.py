@@ -7,6 +7,7 @@ from typing import Any
 from agentless.compat.agents_cli import write_deployment_metadata
 from agentless.plan.model import Context
 from agentless.providers.base import BaseProvider
+from agentless.providers.cloud_run import spec as run_spec
 from agentless.providers.cloud_run.clients import CloudRunClients
 from agentless.providers.cloud_run.resources import ALL_RESOURCES
 from agentless.state.store import State
@@ -20,7 +21,9 @@ class CloudRunProvider(BaseProvider):
 
     def make_clients(self) -> Any:  # noqa: D102
         cfg = self.project.config.provider
-        return CloudRunClients(cfg.project, cfg.region, self.project.deployer)
+        clients = CloudRunClients(cfg.project, cfg.region, self.project.deployer)
+        clients.app_token_header = run_spec.app_token_header(self.project)
+        return clients
 
     def _info(self, state: State) -> dict[str, Any]:
         cfg = self.project.config
@@ -31,6 +34,7 @@ class CloudRunProvider(BaseProvider):
                 "cloudRunService": name,
                 "url": service.get("url"),
                 "image": service.get("image"),
+                "auth": cfg.cloud_run.auth if cfg.cloud_run else "iam",
                 "console": f"https://console.cloud.google.com/run/detail/{cfg.provider.region}/"
                 f"{name.rsplit('/', 1)[-1]}?project={cfg.provider.project}",
             }

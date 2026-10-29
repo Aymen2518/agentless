@@ -23,6 +23,8 @@ _BUILD_DONE = ("SUCCESS", "FAILURE", "INTERNAL_ERROR", "TIMEOUT", "CANCELLED", "
 class CloudRunClients(GcpClients):
     """Real GCP implementation for the Cloud Run target."""
 
+    app_token_header: str | None = None  # auth: googleToken, see id_token_session
+
     # --- Cloud Run services ----------------------------------------------------------------------------------------
 
     def run_service_get(self, name: str) -> dict[str, Any] | None:
@@ -166,7 +168,8 @@ class CloudRunClients(GcpClients):
         import requests
 
         try:
-            response = id_token_session(self._credentials, url).get(url, timeout=60)
+            session = id_token_session(self._credentials, url, app_header=self.app_token_header)
+            response = session.get(url, timeout=60)
         except requests.ConnectionError:
             return None
         if response.status_code == 404 or response.status_code >= 500:
@@ -185,12 +188,15 @@ def audience(url: str) -> str:
     return f"https://{host}"
 
 
-def id_token_session(credentials: Any, url: str) -> Any:
+def id_token_session(credentials: Any, url: str, *, app_header: str | None = None, app_token: str | None = None) -> Any:
     """HTTP session that sends a Google ID token for the service at `url`. Never falls back to anonymous calls.
 
     Impersonated deployers mint the token through the IAM Credentials API and service account keys sign their own.
     User credentials (`gcloud auth application-default login`) send the ID token their refresh returns, which Cloud
     Run accepts for user accounts, like `gcloud auth print-identity-token`. Otherwise the metadata server mints one.
+
+    With `app_header` (auth: googleToken), Cloud Run gets the ID token in X-Serverless-Authorization and the
+    container gets `app_token` (by default the same ID token) in `app_header`, for its own check.
     """
     import google.auth.exceptions
     from google.auth import impersonated_credentials
@@ -199,15 +205,20 @@ def id_token_session(credentials: Any, url: str) -> Any:
     from google.oauth2 import id_token
 
     target = audience(url)  # validates the URL before any credential is touched
+    token_credentials: Any = None
     if isinstance(credentials, impersonated_credentials.Credentials):
-        token_credentials: Any = impersonated_credentials.IDTokenCredentials(
+        token_credentials = impersonated_credentials.IDTokenCredentials(
             credentials, target_audience=target, include_email=True
         )
+    elif hasattr(credentials, "with_target_audience"):  # service account key
+        token_credentials = credentials.with_target_audience(target)
+    if token_credentials is not None and not app_header:
         return AuthorizedSession(token_credentials)
-    if hasattr(credentials, "with_target_audience"):  # service account key
-        return AuthorizedSession(credentials.with_target_audience(target))
     token = None
-    if isinstance(credentials, user_credentials.Credentials):
+    if token_credentials is not None:
+        token_credentials.refresh(Request())
+        token = token_credentials.token
+    elif isinstance(credentials, user_credentials.Credentials):
         credentials.refresh(Request())
         token = credentials.id_token
     if not token:
@@ -220,6 +231,19 @@ def id_token_session(credentials: Any, url: str) -> Any:
             ) from e
     import requests
 
-    session = requests.Session()
-    session.headers["Authorization"] = f"Bearer {token}"
+    class TokenSession(requests.Session):
+        def rebuild_auth(self, prepared_request: Any, response: Any) -> None:
+            # requests only strips Authorization on a cross-host redirect: drop the other token headers too
+            super().rebuild_auth(prepared_request, response)
+            if self.should_strip_auth(response.request.url, prepared_request.url):
+                for header in ("X-Serverless-Authorization", app_header):
+                    if header:
+                        prepared_request.headers.pop(header, None)
+
+    session = TokenSession()
+    if app_header:
+        session.headers["X-Serverless-Authorization"] = f"Bearer {token}"
+        session.headers[app_header] = app_token or token
+    else:
+        session.headers["Authorization"] = f"Bearer {token}"
     return session

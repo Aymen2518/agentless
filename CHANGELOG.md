@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-29
+
+### Added
+- **Public Cloud Run endpoint with two checks, `cloudRun.auth: googleToken`.** The service stays behind Cloud Run
+  IAM: the invoker check is never turned off and `allUsers` is still rejected. Callers send their ID token in
+  `X-Serverless-Authorization`, and the container also verifies the Google token in `cloudRun.googleToken.header`
+  (default `x-google-token`) against `allowedPrincipals` and `audiences`, passed as `AGENTLESS_*` env vars.
+  `invoke` and agent card reads send both headers, and `invoke --app-token` overrides the app token. The README
+  has the FastAPI middleware.
+
 ## [0.8.0] - 2026-10-29
 
 ### Security
@@ -196,7 +206,8 @@ First public release: wheel and sdist (`agentless-cli`) on the GitHub Release, a
 - Plugins through pluggy entry points in the `agentless` group.
 - Multi-arch container image and Claude Code skills for developing agentless and deploying agents with it.
 
-[Unreleased]: https://github.com/Aymen2518/agentless/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/Aymen2518/agentless/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/Aymen2518/agentless/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/Aymen2518/agentless/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/Aymen2518/agentless/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/Aymen2518/agentless/compare/v0.6.0...v0.7.0
