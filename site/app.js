@@ -143,7 +143,7 @@
 
   const PLAN = {
     serviceAccount: "  <span class=s>+ serviceAccount     create   sa-report-agent-dev</span>",
-    agentIdentity: "  <span class=c>= agentIdentity      noop     not used</span>",
+    agentIdentity: "  <span class=c>= agentIdentity      no-op    not used</span>",
     iam: "  <span class=s>+ iam                create   4 to add</span>",
     engine: "  <span class=s>+ engine             create   report-agent (source 9f2c41ab07e3)</span>",
     geminiEnterprise: "  <span class=s>+ geminiEnterprise   create   acme-assistant</span>",
@@ -380,7 +380,7 @@
         ["out", `<span class=b>Planning report-agent → stage dev (acme-agents-dev, europe-west1)</span>
 <span class=b>Changes:</span>
 <span class=s>  + serviceAccount     create   sa-report-agent-dev</span>
-<span class=c>  = agentIdentity      noop     not used</span>
+<span class=c>  = agentIdentity      no-op    not used</span>
 <span class=s>  + iam                create   4 to add</span>
       + roles/aiplatform.user on project acme-agents-dev → sa-report-agent-dev
       + roles/cloudtrace.agent on project acme-agents-dev → sa-report-agent-dev <span class=c>(automatic: tracing)</span>
@@ -421,11 +421,11 @@
         ["$", "agentless plan --stage dev"],
         ["out", `<span class=b>Planning report-agent → stage dev (acme-agents-dev, europe-west1)</span>
 <span class=b>Changes:</span>
-<span class=c>  = serviceAccount     noop     sa-report-agent-dev</span>
-<span class=c>  = iam                noop     4 managed binding(s)</span>
+<span class=c>  = serviceAccount     no-op    sa-report-agent-dev</span>
+<span class=c>  = iam                no-op    4 managed binding(s)</span>
 <span class=n>  ~ engine             update   config only</span>
       ~ memory: 4Gi → 8Gi
-<span class=c>  = geminiEnterprise   noop     acme-assistant</span>
+<span class=c>  = geminiEnterprise   no-op    acme-assistant</span>
 <span class=b>Plan: 1 to update.</span>`],
         ["$", "agentless deploy --stage dev -y"],
         ["wait", "updating with update_mask, no rebuild", 1300],
@@ -468,6 +468,33 @@ Full report written to gs://acme-reports-dev/2026-10-11.md.`],
         ["out", "<span class=n>2026-10-12T09:14:03Z WARNING</span> tool slack.post_message retried after 429"],
         ["$", "agentless open traces --print"],
         ["out", "<span class=u>https://console.cloud.google.com/traces/explorer?project=acme-agents-dev</span>"],
+      ],
+    },
+    {
+      name: "cloud run",
+      steps: [
+        ["note", "# agent.yaml: provider.name cloud-run, cloudRun.auth googleToken, invokers domain:acme.com"],
+        ["$", "agentless plan --stage dev"],
+        ["out", `<span class=b>Planning report-agent → stage dev (acme-agents-dev, europe-west1)</span>
+<span class=b>Changes:</span>
+<span class=s>  + serviceAccount     create   sa-report-agent-dev</span>
+<span class=s>  + iam                create   4 to grant, 0 to revoke</span>
+<span class=s>  + build              create   europe-west1-docker.pkg.dev/acme-agents-dev/cloud-run-source-deploy/report-agent-dev:9f2c41ab07e3</span>
+<span class=s>  + service            create   projects/acme-agents-dev/locations/europe-west1/services/report-agent-dev</span>
+      + <span class=u>https://report-agent-dev-482113.europe-west1.run.app</span>
+      = callers need roles/run.invoker (never public)
+      = auth googleToken: Cloud Run checks roles/run.invoker (X-Serverless-Authorization), then the
+        container must verify the Google token in x-google-token (allowed: domain:acme.com)
+<span class=s>  + access             create   1 binding(s) once the service exists</span>
+      + roles/run.invoker on the service → domain:acme.com
+<span class=b>Plan: 5 to create.</span>`],
+        ["$", "agentless deploy --stage dev -y"],
+        ["wait", "building with Cloud Build, rolling out pinned by digest", 2400],
+        ["out", "<span class=s>✔ deployed</span>"],
+        ["$", "agentless invoke --stage dev -m \"Summarise yesterday's incidents\""],
+        ["note", "# ID token in X-Serverless-Authorization for Cloud Run, the same token in x-google-token for the app"],
+        ["out", `<span class=c>session 7d0c2e4f-91aa-4c55-b0a1-5e2f1c9d8a10</span>
+[report_agent] Two incidents yesterday. INC-2291 and INC-2293, both resolved.`],
       ],
     },
     {

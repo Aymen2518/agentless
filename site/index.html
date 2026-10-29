@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>agentless: deploy ADK agents to Agent Runtime from one file</title>
-<meta name="description" content="agentless deploys ADK agents to Google Cloud Agent Platform from a single agent.yaml: service account, IAM, reasoning engine, Memory Bank, networking, Gemini Enterprise and Agent Registry publishing, and evaluation of the deployed agent, with a real plan before every change.">
+<title>agentless: deploy ADK agents to Agent Runtime or Cloud Run from one file</title>
+<meta name="description" content="agentless deploys ADK agents to Google Cloud Agent Runtime or Cloud Run from a single agent.yaml: service account, IAM, reasoning engine or Cloud Run service, Memory Bank, networking, Gemini Enterprise and Agent Registry publishing, and evaluation of the deployed agent, with a real plan before every change.">
 <meta property="og:title" content="agentless: deploy ADK agents from one file">
-<meta property="og:description" content="Serverless Framework–style deployments for ADK agents on Google Cloud Agent Runtime. One agent.yaml, one command, a real plan.">
+<meta property="og:description" content="Serverless Framework–style deployments for ADK agents on Google Cloud Agent Runtime and Cloud Run. One agent.yaml, one command, a real plan.">
 <meta property="og:type" content="website">
 <meta name="theme-color" content="#0a0c17">
 <link rel="icon" type="image/svg+xml" href="assets/icon.svg">
@@ -43,7 +43,7 @@
       <span class="line" data-scramble>Deploy ADK agents</span>
       <span class="line" data-scramble>from one file.</span>
     </h1>
-    <p class="lead">You build the agent with <code>agents-cli</code>. You describe where and how it runs in <code>agent.yaml</code>. agentless works out what changed against what's deployed on Agent Runtime and applies only that: service account, IAM, reasoning engine, Memory Bank, networking, Gemini Enterprise and Agent Registry. Then it evaluates what it deployed.</p>
+    <p class="lead">You build the agent with <code>agents-cli</code>. You describe where and how it runs in <code>agent.yaml</code>. agentless works out what changed against what's deployed on Agent Runtime or Cloud Run and applies only that: service account, IAM, reasoning engine or Cloud Run service, Memory Bank, networking, Gemini Enterprise and Agent Registry. Then it evaluates what it deployed.</p>
     <div class="cta">
       <a class="btn primary magnetic" href="https://github.com/Aymen2518/agentless#quick-start"><span>Get started</span></a>
       <a class="btn ghost magnetic" href="https://github.com/Aymen2518/agentless#agentyaml"><span>agent.yaml reference</span></a>
@@ -157,7 +157,7 @@ resource "google_vertex_ai_reasoning_engine"…</pre></div>
 <section class="life wrap" id="lifecycle">
   <div class="life-copy">
     <h2>Applied in order, removed in reverse</h2>
-    <p class="sub">Nine steps, always in the same order, each skipped when <code>agent.yaml</code> doesn't use it. A service account is never deleted while it still has bindings, and <code>remove</code> deletes only what the state record says agentless created.</p>
+    <p class="sub">Nine steps, always in the same order, each skipped when <code>agent.yaml</code> doesn't use it. On Cloud Run, a build and a service replace the engine. A service account is never deleted while it still has bindings, and <code>remove</code> deletes only what the state record says agentless created.</p>
     <div class="seg" role="radiogroup" aria-label="Lifecycle direction">
       <button type="button" role="radio" aria-checked="true" data-dir="deploy">deploy</button>
       <button type="button" role="radio" aria-checked="false" data-dir="remove">remove</button>
@@ -178,9 +178,11 @@ resource "google_vertex_ai_reasoning_engine"…</pre></div>
 </section>
 
 <section class="features wrap" id="features">
-  <h2>Everything an Agent Runtime deploy needs</h2>
+  <h2>Everything an agent deploy needs</h2>
   <p class="sub">The things that used to be split between Terraform, deploy flags and a publish script, in one file that agentless owns end to end.</p>
   <div class="grid">
+    <article class="card"><svg class="ic" viewBox="0 0 24 24"><path d="M7 18a5 5 0 1 1 .9-9.9A6 6 0 0 1 19.5 10 4 4 0 0 1 18 18z"/><path d="M9 14h6"/></svg><h3>Agent Runtime or Cloud Run</h3><p><code>provider.name: cloud-run</code> deploys the same agent as a Cloud Run service. It's built with Cloud Build, pinned by digest, and given a session engine for sessions and Memory Bank, plus ingress, IAP and Direct VPC egress.</p></article>
+    <article class="card"><svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.7 3.7 5.7 3.7 9s-1.2 6.3-3.7 9c-2.5-2.7-3.7-5.7-3.7-9S9.5 5.7 12 3z"/></svg><h3>Public, still behind IAM</h3><p><code>cloudRun.auth: googleToken</code> opens a Cloud Run agent to callers outside your network with two checks. Cloud Run IAM verifies the ID token, and your app verifies the Google token in <code>x-google-token</code>. Never <code>allUsers</code>.</p></article>
     <article class="card"><svg class="ic" viewBox="0 0 24 24"><path d="M4 6h16M4 12h10M4 18h6"/><path d="M17 15l3 3-3 3"/></svg><h3>A real plan</h3><p><code>agentless plan</code> diffs every resource before anything changes. <code>--detailed-exitcode</code> exits 2 when there's work to do, for CI.</p></article>
     <article class="card"><svg class="ic" viewBox="0 0 24 24"><path d="M12 3v6M12 15v6M3 12h6M15 12h6"/><circle cx="12" cy="12" r="3"/></svg><h3>Minimal engine updates</h3><p>Config changes go out with an <code>update_mask</code> and no rebuild. Code is rebuilt only when the source hash changes.</p></article>
     <article class="card"><svg class="ic" viewBox="0 0 24 24"><path d="M12 2l8 3v6c0 5-3.5 9-8 11-4.5-2-8-6-8-11V5z"/><path d="M9 12l2 2 4-4"/></svg><h3>IAM it won't overreach</h3><p>Read-modify-write with etag retries. agentless removes only the members it added. Existing bindings show as "not managed".</p></article>
@@ -192,7 +194,7 @@ resource "google_vertex_ai_reasoning_engine"…</pre></div>
     <article class="card"><svg class="ic" viewBox="0 0 24 24"><path d="M9 11l3 3 8-8"/><path d="M20 12v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/></svg><h3>Evaluate what you deployed</h3><p><code>agentless eval</code> scores the live engine on the Evaluation Service and exits 1 below a threshold. <code>deploy --eval</code> makes it a gate.</p></article>
     <article class="card"><svg class="ic" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg><h3>Online monitors</h3><p>Evaluators that sample live traces and score them continuously. Declared in <code>evaluation.monitors</code>, suspended with <code>enabled: false</code>.</p></article>
     <article class="card"><svg class="ic" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M17.5 14v7M14 17.5h7"/></svg><h3>Agent Registry for A2A</h3><p>The agent card is read from the deployed engine and registered where Agent Gateways govern it. <code>plan</code> shows card drift.</p></article>
-    <article class="card"><svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.5-6 8-6s8 2 8 6"/></svg><h3>Who can call this agent</h3><p><code>access.invokers</code> are granted on the engine, not the project, so they reach this agent and no other. Removing one revokes it. On Cloud Run, <code>cloudRun.auth: googleToken</code> opens the endpoint to outside callers and adds a Google token check in the app, on top of IAM.</p></article>
+    <article class="card"><svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.5-6 8-6s8 2 8 6"/></svg><h3>Who can call this agent</h3><p><code>access.invokers</code> are granted on the engine, not the project, so they reach this agent and no other. Removing one revokes it. On Cloud Run, they get <code>roles/run.invoker</code> on the service.</p></article>
     <article class="card"><svg class="ic" viewBox="0 0 24 24"><circle cx="5" cy="12" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="19" cy="18" r="2"/><path d="M7 11l10-4M7 13l10 4"/></svg><h3>Private networking and CMEK</h3><p>PSC-I with DNS peering, and customer-managed keys. Immutable changes stop the plan (✋) unless you pass <code>--allow-replace</code>.</p></article>
     <article class="card"><svg class="ic" viewBox="0 0 24 24"><path d="M7 4h10l3 3v13H4V4h3z"/><path d="M8 13h8M8 17h5"/></svg><h3>Variables from anywhere</h3><p>Serverless syntax plus <code>${secret:}</code> from Secret Manager and <code>${tf(gs://…):output}</code> from Terraform remote state.</p></article>
     <article class="card"><svg class="ic" viewBox="0 0 24 24"><path d="M20 11a8 8 0 0 0-14.9-3M4 13a8 8 0 0 0 14.9 3"/><path d="M4 4v4h4M20 20v-4h-4"/></svg><h3>Adopts agents-cli deploys</h3><p>An engine already deployed with the same display name is updated, not duplicated. <code>agents-cli run</code> and <code>publish</code> keep working.</p></article>
@@ -207,6 +209,7 @@ resource "google_vertex_ai_reasoning_engine"…</pre></div>
     <table>
       <thead><tr><th scope="col"></th><th scope="col">Terraform per agent + <code>agents-cli deploy</code></th><th scope="col">agentless</th></tr></thead>
       <tbody>
+        <tr><th scope="row">Deployment target</th><td>a different tool and flag set for Agent Runtime and Cloud Run</td><td class="best">Agent Runtime or Cloud Run, from the same file</td></tr>
         <tr><th scope="row">Files per agent</th><td>a Terraform module, deploy flags, a publish script</td><td class="best">one <code>agent.yaml</code></td></tr>
         <tr><th scope="row">See changes first</th><td><code>terraform plan</code> covers infra only; the engine deploy has no diff</td><td class="best">one plan for SA, IAM, engine, access, monitors and publishing</td></tr>
         <tr><th scope="row">Unchanged code</th><td>rebuilt on every deploy</td><td class="best">skipped by source hash</td></tr>
@@ -214,6 +217,7 @@ resource "google_vertex_ai_reasoning_engine"…</pre></div>
         <tr><th scope="row">Memory Bank, labels</th><td>not exposed</td><td class="best">in the file</td></tr>
         <tr><th scope="row">Gemini Enterprise</th><td>a separate <code>publish</code> run</td><td class="best">part of the deploy</td></tr>
         <tr><th scope="row">Evaluation</th><td>on local code, before deploy</td><td class="best">on the deployed engine, as a deploy gate and online</td></tr>
+        <tr><th scope="row">Public endpoint</th><td><code>allUsers</code> on the service, or a proxy you maintain</td><td class="best">Cloud Run IAM plus a Google token check in the app</td></tr>
         <tr><th scope="row">Clean removal</th><td>by hand</td><td class="best"><code>remove</code> deletes only what it created</td></tr>
       </tbody>
     </table>
