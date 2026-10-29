@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from pathlib import Path
 
@@ -771,3 +772,247 @@ def test_token_headers_are_dropped_on_a_cross_host_redirect(monkeypatch: pytest.
     assert not {"Authorization", "X-Serverless-Authorization", "x-google-token"} & set(leaked.headers)
     kept = {"X-Serverless-Authorization", "x-google-token"} if app_header else {"Authorization"}
     assert kept <= set(redirected(f"{URL}/other").headers)
+
+
+# --- auth: webhook ---------------------------------------------------------------------------------------------------
+
+_WEBHOOK = {"auth": "webhook", "webhook": {"secret": {"secret": "gitlab-webhook-token"}}}
+
+
+def _webhook(data: dict) -> None:
+    data["cloudRun"] = json.loads(json.dumps(_WEBHOOK))
+
+
+def _secret_env(gcp: FakeGcp) -> dict[str, dict]:
+    container = _service(gcp)["template"]["containers"][0]
+    return {e["name"]: e["valueSource"]["secretKeyRef"] for e in container["env"] if "valueSource" in e}
+
+
+def test_webhook_turns_iam_off_and_hands_the_secret_to_the_container(make_run, gcp: FakeGcp, edit) -> None:
+    edit(_webhook)
+    _, changeset = make_run().plan(DeployOptions())
+    service = next(c for c in changeset.changes if c.resource == "service")
+    assert any("invoker IAM check is off" in d for d in service.details)
+    assert not any("never public" in d for d in service.details)
+    deploy(make_run())
+
+    assert _service(gcp)["invokerIamDisabled"] is True
+    env = _env(gcp)
+    assert env["AGENTLESS_AUTH_MODE"] == "webhook"
+    assert env["AGENTLESS_WEBHOOK_HEADER"] == "x-gitlab-token"
+    assert _secret_env(gcp)["AGENTLESS_WEBHOOK_SECRET"] == {"secret": "gitlab-webhook-token", "version": "latest"}
+    accessors = gcp.iam_members("secret", "gitlab-webhook-token") or {}
+    assert accessors.get("roles/secretmanager.secretAccessor")  # the runtime SA reads it
+    assert ("webhook_probe", URL, "x-gitlab-token") in gcp.calls
+    members = gcp.iam_members("runService", SERVICE) or {}
+    assert not {"allUsers", "allAuthenticatedUsers"} & {m for ms in members.values() for m in ms}
+    assert actions(make_run())["service"] == Action.NOOP
+
+
+def test_webhook_fails_closed_when_the_container_lets_anonymous_calls_in(make_run, gcp: FakeGcp, edit) -> None:
+    edit(_webhook)
+    gcp.webhook_statuses = (200, 401)
+    with pytest.raises(RuntimeError, match="answered 200 without x-gitlab-token"):
+        deploy(make_run())
+    assert _service(gcp)["invokerIamDisabled"] is False  # IAM is back on
+
+    gcp.webhook_statuses = (401, 401)  # the app is fixed: the next deploy turns IAM off again
+    assert actions(make_run())["service"] == Action.UPDATE
+    deploy(make_run())
+    assert _service(gcp)["invokerIamDisabled"] is True
+
+
+def test_webhook_rejects_a_wrong_token_too(make_run, gcp: FakeGcp, edit) -> None:
+    edit(_webhook)
+    gcp.webhook_statuses = (401, 200)  # checks the header is present, not its value
+    with pytest.raises(RuntimeError, match="200 with a wrong one"):
+        deploy(make_run())
+    assert _service(gcp)["invokerIamDisabled"] is False
+
+
+@pytest.mark.parametrize("error", [RuntimeError("probe crashed"), KeyboardInterrupt()])
+def test_webhook_fails_closed_when_the_probe_itself_fails(make_run, gcp: FakeGcp, edit, error) -> None:
+    edit(_webhook)
+
+    def broken(_url: str, _header: str) -> list[int]:
+        raise error
+
+    gcp.webhook_probe = broken  # type: ignore[method-assign]
+    with pytest.raises(type(error)):
+        deploy(make_run())
+    assert _service(gcp)["invokerIamDisabled"] is False
+
+
+def test_webhook_probe_timeouts_count_as_not_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    import requests
+
+    from agentless.providers.cloud_run.clients import CloudRunClients
+
+    def timeout(*_a, **_k):
+        raise requests.ReadTimeout("slow")
+
+    monkeypatch.setattr(requests, "get", timeout)
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    statuses = CloudRunClients.webhook_probe(object.__new__(CloudRunClients), URL, "x-gitlab-token")  # type: ignore[arg-type]
+    assert statuses == [0, 0]
+
+
+def test_switching_from_webhook_back_to_iam_turns_the_check_back_on(make_run, gcp: FakeGcp, edit) -> None:
+    edit(_webhook)
+    deploy(make_run())
+    edit(lambda d: d.update(cloudRun={}))
+    _, changeset = make_run().plan(DeployOptions())
+    service = next(c for c in changeset.changes if c.resource == "service")
+    assert any("- secret_env.AGENTLESS_WEBHOOK_SECRET" in d for d in service.details)
+    deploy(make_run())
+    assert _service(gcp)["invokerIamDisabled"] is False
+    assert not any(k.startswith("AGENTLESS_") for k in {**_env(gcp), **_secret_env(gcp)})
+    assert gcp.kinds().count("webhook_probe") == 1
+
+
+def test_iam_disabled_outside_agentless_is_kept_off_in_webhook_mode(make_run, gcp: FakeGcp, edit) -> None:
+    edit(_webhook)
+    deploy(make_run())
+    gcp.run_services[SERVICE]["invokerIamDisabled"] = False
+    _, changeset = make_run().plan(DeployOptions())
+    service = next(c for c in changeset.changes if c.resource == "service")
+    assert any("turn the invoker IAM check off" in d for d in service.details)
+    deploy(make_run())
+    assert _service(gcp)["invokerIamDisabled"] is True
+
+
+def test_webhook_code_only_keeps_iam_off_and_probes(make_run, gcp: FakeGcp, run_dir: Path, edit) -> None:
+    edit(_webhook)
+    deploy(make_run())
+    (run_dir / "app" / "agent.py").write_text("# changed\n")
+    deploy(make_run(), code_only=True)
+    assert _service(gcp)["invokerIamDisabled"] is True
+    assert gcp.kinds().count("webhook_probe") == 2
+
+
+def test_a_public_grant_still_blocks_in_webhook_mode(make_run, gcp: FakeGcp, edit) -> None:
+    edit(_webhook)
+    deploy(make_run())
+    gcp.iam_modify("runService", SERVICE, [("roles/run.invoker", "allUsers")], [])
+    with pytest.raises(DeployError, match="callable through IAM"):
+        deploy(make_run(), force=True)
+
+
+def test_webhook_header_can_be_changed(make_run, gcp: FakeGcp, edit) -> None:
+    def change(d: dict) -> None:
+        _webhook(d)
+        d["cloudRun"]["webhook"] |= {"header": "X-Hub-Signature-256"}
+
+    edit(change)
+    deploy(make_run())
+    assert _env(gcp)["AGENTLESS_WEBHOOK_HEADER"] == "x-hub-signature-256"
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        (lambda d: d.update(cloudRun={"auth": "webhook"}), "needs cloudRun.webhook.secret"),
+        (lambda d: d.update(cloudRun={**_WEBHOOK, "iap": True}), "exclusive"),
+        (lambda d: d.update(cloudRun={"webhook": _WEBHOOK["webhook"]}), "only valid with auth: webhook"),
+        (
+            lambda d: d.update(
+                cloudRun={"auth": "webhook", "webhook": {"header": "Authorization", "secret": {"secret": "s"}}}
+            ),
+            "reserved",
+        ),
+        (
+            lambda d: d.update(
+                cloudRun={"auth": "webhook", "webhook": {"header": "X-Forwarded-For", "secret": {"secret": "s"}}}
+            ),
+            "reserved",
+        ),
+        (lambda d: (_webhook(d), d.update(access={"invokers": ["user:a@b.co"]})), "access.invokers grant nothing"),
+        (
+            lambda d: (_webhook(d), d.update(publish={"agentRegistry": {}})),
+            "remove publish with cloudRun.auth: webhook",
+        ),
+        (
+            lambda d: (_webhook(d), d["agent"].update(environment={"AGENTLESS_WEBHOOK_HEADER": "x"})),
+            "AGENTLESS_WEBHOOK_HEADER are set by cloudRun.auth: webhook",
+        ),
+        (
+            lambda d: (_webhook(d), d["agent"].update(secrets={"AGENTLESS_WEBHOOK_SECRET": {"secret": "other"}})),
+            "AGENTLESS_WEBHOOK_SECRET are set by cloudRun.auth: webhook",
+        ),
+    ],
+)
+def test_webhook_settings_are_validated(run_dir: Path, edit, change, message: str) -> None:
+    edit(change)
+    with pytest.raises(ConfigError, match=message):
+        _load(run_dir)
+
+
+def test_webhook_session_sends_only_the_secret() -> None:
+    from agentless.providers.cloud_run.clients import webhook_session
+
+    session = webhook_session(URL, "x-gitlab-token", "s3cret")
+    assert session.headers["x-gitlab-token"] == "s3cret"
+    assert "Authorization" not in session.headers and "X-Serverless-Authorization" not in session.headers
+    with pytest.raises(RuntimeError, match="not an https://\\*.run.app"):
+        webhook_session("https://evil.example.com", "x-gitlab-token", "s3cret")
+
+
+def test_webhook_secret_is_dropped_on_a_cross_host_redirect() -> None:
+    import requests
+
+    from agentless.providers.cloud_run.clients import webhook_session
+
+    session = webhook_session(URL, "x-gitlab-token", "s3cret")
+    prepared = requests.Request("GET", "https://evil.example.com/", headers={"x-gitlab-token": "s3cret"}).prepare()
+    response = requests.Response()
+    response.request = requests.Request("GET", f"{URL}/run_sse").prepare()
+    session.rebuild_auth(prepared, response)
+    assert "x-gitlab-token" not in prepared.headers
+
+
+def test_webhook_probe_sends_no_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    import requests
+
+    from agentless.providers.cloud_run.clients import CloudRunClients
+
+    seen: list[dict] = []
+
+    class Response:
+        def __init__(self, status: int) -> None:
+            self.status_code = status
+
+    answers = iter([503, 401, 403])  # a cold start, then the app's answers
+    monkeypatch.setattr(requests, "get", lambda url, headers, **_: seen.append(headers) or Response(next(answers)))
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    statuses = CloudRunClients.webhook_probe(object.__new__(CloudRunClients), URL, "x-gitlab-token")  # type: ignore[arg-type]
+    assert statuses == [401, 403]
+    assert seen[0] == {} and seen[1] == {}
+    assert set(seen[2]) == {"x-gitlab-token"} and seen[2]["x-gitlab-token"].startswith("agentless-probe-")
+
+
+def test_invoke_in_webhook_mode_sends_the_secret_not_a_google_token(fake_cli: Path, edit, monkeypatch) -> None:
+    from typer.testing import CliRunner
+
+    from agentless import cli
+
+    def change(d: dict) -> None:
+        _cloud_run(d)
+        _webhook(d)
+
+    edit(change)
+    _scaffold_for_cloud_run(fake_cli)
+    CliRunner().invoke(cli.app, ["deploy", "-c", str(fake_cli / "agent.yaml"), "--yes"])
+    secrets: list[str] = []
+    monkeypatch.setattr(cli, "read_secret", lambda _p, secret, version, _d: secrets.append(secret) or "s3cret")
+    sent: dict = {}
+
+    def fake_invoke(url, app, message, **kw):
+        sent.update(kw, url=url)
+        yield {"session_id": "s-1"}
+
+    monkeypatch.setattr(cli.run_ops, "invoke", fake_invoke)
+    result = CliRunner().invoke(cli.app, ["invoke", "-c", str(fake_cli / "agent.yaml"), "-m", "hi"])
+    assert result.exit_code == 0, result.output
+    assert secrets == ["gitlab-webhook-token"]
+    assert sent["http"].headers["x-gitlab-token"] == "s3cret"
+    assert "Authorization" not in sent["http"].headers

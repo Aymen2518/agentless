@@ -18,6 +18,7 @@ from agentless import __version__, auth
 from agentless.compat.agents_cli import read_manifest
 from agentless.config.loader import DEFAULT_CONFIG_FILE, ConfigError, Project, load_project
 from agentless.config.schema import AgentConfig
+from agentless.config.sources import read_secret
 from agentless.hooks import plugin_manager, variable_sources
 from agentless.package.packager import PackageError, write_archive
 from agentless.plan.model import Action, ChangeSet, DeployOptions
@@ -27,6 +28,7 @@ from agentless.providers.agent_runtime.provider import AgentRuntimeProvider, Dep
 from agentless.providers.base import BaseProvider
 from agentless.providers.cloud_run import ops as run_ops
 from agentless.providers.cloud_run import spec as run_spec
+from agentless.providers.cloud_run.clients import webhook_session
 from agentless.providers.cloud_run.provider import CloudRunProvider
 from agentless.state.store import StateError
 
@@ -571,7 +573,8 @@ def invoke(
     app_token: Annotated[
         str | None,
         typer.Option(
-            help="Cloud Run auth googleToken: token sent in cloudRun.googleToken.header (default: your ID token)."
+            help="Cloud Run auth googleToken: token sent in cloudRun.googleToken.header (default: your ID token). "
+            "auth webhook: the shared secret (default: read from cloudRun.webhook.secret)."
         ),
     ] = None,
     impersonate: ImpersonateOpt = None,
@@ -580,19 +583,28 @@ def invoke(
     project, pm = _load(config, stage, param, impersonate)
     cfg = project.config
     provider = _provider(project, pm)
-    if app_token and not run_spec.app_token_header(project):
-        raise ConfigError("--app-token only applies to Cloud Run agents with cloudRun.auth: googleToken")
+    webhook = run_spec.webhook_header(project)
+    if app_token and not (run_spec.app_token_header(project) or webhook):
+        raise ConfigError("--app-token only applies to Cloud Run agents with cloudRun.auth: googleToken or webhook")
     if _on_cloud_run(project):
         _service_name(provider)
+        url = provider.info()["url"]
+        http = None
+        if webhook:
+            assert cfg.cloud_run and cfg.cloud_run.webhook
+            ref = cfg.cloud_run.webhook.secret
+            token = app_token or read_secret(cfg.provider.project, ref.secret, ref.version, project.deployer)
+            http = webhook_session(url, webhook, token)
         events = run_ops.invoke(
-            provider.info()["url"],
+            url,
             project.agent_directory,
             message,
             user_id=user,
             session_id=session,
-            credentials=project.deployer.credentials(),
+            credentials=None if webhook else project.deployer.credentials(),
             app_header=run_spec.app_token_header(project),
             app_token=app_token,
+            http=http,
         )
     else:
         events = ops.invoke(

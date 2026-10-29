@@ -117,7 +117,16 @@ AUTH_ENV = (
     "AGENTLESS_TOKEN_HEADER",
     "AGENTLESS_TOKEN_AUDIENCES",
     "AGENTLESS_ALLOWED_PRINCIPALS",
+    "AGENTLESS_WEBHOOK_HEADER",
+    "AGENTLESS_WEBHOOK_SECRET",
 )
+
+
+def _app_header(v: str) -> str:
+    v = v.lower()
+    if v in _RESERVED_HEADERS or v.startswith(_RESERVED_HEADER_PREFIXES):
+        raise ValueError(f"{v} is reserved by HTTP, Cloud Run or IAP; pick another header")
+    return v
 
 
 class GoogleToken(_Model):
@@ -139,10 +148,7 @@ class GoogleToken(_Model):
     @field_validator("header")
     @classmethod
     def _header(cls, v: str) -> str:
-        v = v.lower()
-        if v in _RESERVED_HEADERS or v.startswith(_RESERVED_HEADER_PREFIXES):
-            raise ValueError(f"{v} is reserved by HTTP, Cloud Run or IAP; pick another header (default x-google-token)")
-        return v
+        return _app_header(v)
 
     @field_validator("audiences")
     @classmethod
@@ -162,8 +168,34 @@ class GoogleToken(_Model):
         return v
 
 
+class SecretRef(_Model):
+    """Secret Manager reference exposed as an env var."""
+
+    secret: str
+    version: str = "latest"
+
+
+class Webhook(_Model):
+    """Shared-secret gate of `cloudRun.auth: webhook`, checked by the container: Cloud Run's IAM check is off."""
+
+    header: str = Field(
+        default="x-gitlab-token",
+        pattern=r"^[A-Za-z0-9-]+$",
+        description="Request header carrying the shared secret (GitLab sends X-Gitlab-Token).",
+    )
+    secret: SecretRef = Field(
+        description="Secret Manager secret holding the expected value; the container gets it as "
+        "AGENTLESS_WEBHOOK_SECRET and the runtime identity is granted access to it."
+    )
+
+    @field_validator("header")
+    @classmethod
+    def _header(cls, v: str) -> str:
+        return _app_header(v)
+
+
 class CloudRun(_Model):
-    """Cloud Run service settings (provider.name: cloud-run); callers always need roles/run.invoker, never public."""
+    """Cloud Run service settings (provider.name: cloud-run); callers need roles/run.invoker unless auth: webhook."""
 
     service_name: str | None = Field(
         default=None, pattern=r"^[a-z]([a-z0-9-]{0,47}[a-z0-9])?$", description="Defaults to <service>-<stage>."
@@ -184,13 +216,16 @@ class CloudRun(_Model):
         description="Network sources allowed to reach the service. IAM still applies to every request.",
     )
     iap: bool = Field(default=False, description="Put Identity-Aware Proxy in front of the service.")
-    auth: Literal["iam", "googleToken"] = Field(
+    auth: Literal["iam", "googleToken", "webhook"] = Field(
         default="iam",
         description="iam: Cloud Run checks the caller's ID token (Authorization). googleToken: Cloud Run still "
         "checks it, sent as X-Serverless-Authorization, and the container also verifies the Google token in "
-        "googleToken.header. The invoker IAM check is never turned off.",
+        "googleToken.header. webhook: for callers that cannot get a Google token (GitLab, GitHub webhooks): "
+        "Cloud Run's invoker IAM check is off and the container must reject every request without the secret in "
+        "webhook.header; agentless checks that it does after each rollout and turns IAM back on if not.",
     )
     google_token: GoogleToken | None = Field(default=None, description="Settings of auth: googleToken.")
+    webhook: Webhook | None = Field(default=None, description="Settings of auth: webhook.")
     vpc_egress: VpcEgress | None = None
     timeout: str = Field(default="300s", pattern=r"^\d+s$", description="Request timeout, at most 3600s.")
     cpu_throttling: bool = Field(default=False, description="Only allocate CPU during requests.")
@@ -220,6 +255,13 @@ class CloudRun(_Model):
                 raise ValueError("auth googleToken is for callers outside the VPC; use ingress all")
         elif self.google_token is not None:
             raise ValueError("cloudRun.googleToken is only valid with auth: googleToken")
+        if self.auth == "webhook":
+            if self.webhook is None:
+                raise ValueError("auth webhook needs cloudRun.webhook.secret")
+            if self.iap:
+                raise ValueError("auth webhook and iap are exclusive: webhook callers cannot pass IAP")
+        elif self.webhook is not None:
+            raise ValueError("cloudRun.webhook is only valid with auth: webhook")
         return self
 
 
@@ -258,13 +300,6 @@ class Runtime(_Model):
         if self.min_instances > self.max_instances:
             raise ValueError("minInstances cannot exceed maxInstances")
         return self
-
-
-class SecretRef(_Model):
-    """Secret Manager reference exposed as an env var."""
-
-    secret: str
-    version: str = "latest"
 
 
 class Telemetry(_Model):
@@ -756,9 +791,22 @@ class AgentConfig(_Model):
                 "building the source needs provider.stagingBucket (or set cloudRun.image)",
             ),
         ]
-        if self.cloud_run.auth == "googleToken":
+        if self.cloud_run.auth != "iam":
             reserved = sorted((set(self.agent.environment) | set(self.agent.secrets)) & set(AUTH_ENV))
-            unsupported.append((bool(reserved), f"{', '.join(reserved)} are set by cloudRun.auth: googleToken"))
+            unsupported.append(
+                (bool(reserved), f"{', '.join(reserved)} are set by cloudRun.auth: {self.cloud_run.auth}")
+            )
+        if self.cloud_run.auth == "webhook":
+            unsupported += [
+                (bool(self.access.invokers), "access.invokers grant nothing with cloudRun.auth: webhook; remove them"),
+                (
+                    ge is not None or self.publish.agent_registry is not None,
+                    (
+                        "publish targets call the agent with Google tokens, not the webhook secret: "
+                        "remove publish with cloudRun.auth: webhook"
+                    ),
+                ),
+            ]
         problems = [message for failed, message in unsupported if failed]
         if problems:
             raise ValueError("provider cloud-run: " + "; ".join(problems))

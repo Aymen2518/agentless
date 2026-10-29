@@ -38,7 +38,7 @@
 
 <header class="wrap hero">
   <div class="hero-copy">
-    <p class="badge"><span class="pulse"></span>v0.9.0, open source under Apache-2.0</p>
+    <p class="badge"><span class="pulse"></span>v0.10.0, open source under Apache-2.0</p>
     <h1 id="headline" aria-label="Deploy ADK agents from one file.">
       <span class="line" data-scramble>Deploy ADK agents</span>
       <span class="line" data-scramble>from one file.</span>
@@ -182,7 +182,7 @@ resource "google_vertex_ai_reasoning_engine"…</pre></div>
   <p class="sub">The things that used to be split between Terraform, deploy flags and a publish script, in one file that agentless owns end to end.</p>
   <div class="grid">
     <article class="card"><svg class="ic" viewBox="0 0 24 24"><path d="M7 18a5 5 0 1 1 .9-9.9A6 6 0 0 1 19.5 10 4 4 0 0 1 18 18z"/><path d="M9 14h6"/></svg><h3>Agent Runtime or Cloud Run</h3><p><code>provider.name: cloud-run</code> deploys the same agent as a Cloud Run service. It's built with Cloud Build, pinned by digest, and given a session engine for sessions and Memory Bank, plus ingress, IAP and Direct VPC egress.</p></article>
-    <article class="card"><svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.7 3.7 5.7 3.7 9s-1.2 6.3-3.7 9c-2.5-2.7-3.7-5.7-3.7-9S9.5 5.7 12 3z"/></svg><h3>Public, still behind IAM</h3><p><code>cloudRun.auth: googleToken</code> opens a Cloud Run agent to callers outside your network with two checks. Cloud Run IAM verifies the ID token, and your app verifies the Google token in <code>x-google-token</code>. Never <code>allUsers</code>.</p></article>
+    <article class="card"><svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.7 3.7 5.7 3.7 9s-1.2 6.3-3.7 9c-2.5-2.7-3.7-5.7-3.7-9S9.5 5.7 12 3z"/></svg><h3>Public, still behind IAM</h3><p><code>cloudRun.auth: googleToken</code> opens a Cloud Run agent to callers outside your network with two checks. Cloud Run IAM verifies the ID token, and your app verifies the Google token in <code>x-google-token</code>. Never <code>allUsers</code>. For GitLab or GitHub webhooks, <code>auth: webhook</code> gates the service on a shared secret instead, and agentless proves anonymous calls are refused after every rollout.</p></article>
     <article class="card"><svg class="ic" viewBox="0 0 24 24"><path d="M4 6h16M4 12h10M4 18h6"/><path d="M17 15l3 3-3 3"/></svg><h3>A real plan</h3><p><code>agentless plan</code> diffs every resource before anything changes. <code>--detailed-exitcode</code> exits 2 when there's work to do, for CI.</p></article>
     <article class="card"><svg class="ic" viewBox="0 0 24 24"><path d="M12 3v6M12 15v6M3 12h6M15 12h6"/><circle cx="12" cy="12" r="3"/></svg><h3>Minimal engine updates</h3><p>Config changes go out with an <code>update_mask</code> and no rebuild. Code is rebuilt only when the source hash changes.</p></article>
     <article class="card"><svg class="ic" viewBox="0 0 24 24"><path d="M12 2l8 3v6c0 5-3.5 9-8 11-4.5-2-8-6-8-11V5z"/><path d="M9 12l2 2 4-4"/></svg><h3>IAM it won't overreach</h3><p>Read-modify-write with etag retries. agentless removes only the members it added. Existing bindings show as "not managed".</p></article>

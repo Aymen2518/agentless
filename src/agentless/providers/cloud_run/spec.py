@@ -49,12 +49,20 @@ def app_token_header(project: Project) -> str | None:
     return run.google_token.header if run and run.auth == "googleToken" and run.google_token else None
 
 
+def webhook_header(project: Project) -> str | None:
+    """Header the container reads the shared secret from (auth: webhook), else None."""
+    run = project.config.cloud_run
+    return run.webhook.header if run and run.auth == "webhook" and run.webhook else None
+
+
 def auth_env(project: Project, url: str) -> dict[str, str]:
-    """Settings the container needs to verify the Google token itself; empty with auth: iam.
+    """Settings the container needs to check the caller itself; empty with auth: iam.
 
     They override agent.env: the check is part of the deployment, not something an env var may loosen.
     """
     run = project.config.cloud_run
+    if run and run.auth == "webhook" and run.webhook:
+        return {"AGENTLESS_AUTH_MODE": "webhook", "AGENTLESS_WEBHOOK_HEADER": run.webhook.header}
     if not run or run.auth != "googleToken" or not run.google_token:
         return {}
     token = run.google_token
@@ -88,8 +96,11 @@ def desired_spec(
         env.setdefault("GOOGLE_CLOUD_AGENT_ENGINE_ID", session_engine.rsplit("/", 1)[-1])
         env.setdefault("GOOGLE_CLOUD_AGENT_ENGINE_LOCATION", cfg.provider.region)
     env |= auth_env(project, url)
+    secrets = dict(agent.secrets)
+    if run.auth == "webhook" and run.webhook:
+        secrets["AGENTLESS_WEBHOOK_SECRET"] = run.webhook.secret
     vpc = run.vpc_egress
-    return {
+    spec: dict[str, Any] = {
         "labels": dict(
             sorted(
                 {**cfg.provider.labels, "agentless-service": cfg.service, "agentless-stage": cfg.provider.stage}.items()
@@ -98,7 +109,7 @@ def desired_spec(
         "description": agent.description or "",
         "service_account": service_account or "",
         "env": dict(sorted(env.items())),
-        "secret_env": {k: {"secret": v.secret, "version": v.version} for k, v in sorted(agent.secrets.items())},
+        "secret_env": {k: {"secret": v.secret, "version": v.version} for k, v in sorted(secrets.items())},
         "min_instances": agent.runtime.min_instances,
         "max_instances": agent.runtime.max_instances,
         "resource_limits": {"cpu": agent.runtime.cpu, "memory": agent.runtime.memory},
@@ -114,10 +125,13 @@ def desired_spec(
         "port": run.port,
         "encryption_key": agent.encryption.kms_key,
     }
+    if run.auth == "webhook":
+        spec["invoker_iam_disabled"] = True  # only set when on, so other services' stored specs stay unchanged
+    return spec
 
 
 def api_service(spec: dict[str, Any], image: str) -> dict[str, Any]:
-    """REST body of the service. The invoker IAM check is always on: agents are never callable anonymously."""
+    """REST body of the service. The invoker IAM check is on unless auth: webhook, where the container gates calls."""
     container: dict[str, Any] = {
         "image": image,
         "ports": [{"containerPort": spec["port"]}],
@@ -153,7 +167,7 @@ def api_service(spec: dict[str, Any], image: str) -> dict[str, Any]:
         "labels": dict(spec["labels"]),
         "description": spec["description"],
         "ingress": spec["ingress"],
-        "invokerIamDisabled": False,
+        "invokerIamDisabled": bool(spec.get("invoker_iam_disabled")),
         "template": template,
     }
     if spec["iap"]:

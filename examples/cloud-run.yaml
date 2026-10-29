@@ -27,6 +27,10 @@ cloudRun:
   # googleToken:                           #   Cloud Run still checks roles/run.invoker (X-Serverless-Authorization),
   #   header: x-google-token               #   then the container verifies the Google token in this header
   #   allowedPrincipals: [domain:acme.example.com]
+  # auth: webhook                          # GitLab/GitHub webhook receiver: Cloud Run IAM off, the container checks
+  # webhook:                               #   the shared secret in this header (verified after each rollout)
+  #   header: x-gitlab-token
+  #   secret: { secret: gitlab-webhook-token }
   vpcEgress: { network: acme-vpc, subnetwork: agents-europe-west1, egress: private-ranges-only }
   timeout: 600s
   cpuThrottling: false

@@ -301,7 +301,16 @@ class ServiceResource(Resource):
                     f"! Gemini Enterprise calls the agent with an ID token only, without {header}: the container "
                     "must accept it (its service agent holds roles/run.invoker) or GE calls will be refused"
                 )
+        if header := run_spec.webhook_header(ctx.project):
+            notes.append(
+                f"! auth webhook: Cloud Run's invoker IAM check is off; the container must reject every request "
+                f"without the secret in {header} (checked after the rollout, IAM turned back on if not)"
+            )
         return notes
+
+    @staticmethod
+    def _iam_disabled(ctx: Context) -> bool:
+        return run_spec.webhook_header(ctx.project) is not None
 
     def _code_changed(self, ctx: Context, st: dict[str, Any]) -> bool:
         run = ctx.project.config.cloud_run
@@ -316,7 +325,8 @@ class ServiceResource(Resource):
         desired = self._desired(ctx, planning=True)
         if live is None:
             details = ["! deleted outside agentless; recreating"] if st else []
-            details += [f"+ {self._url(ctx)}", "= callers need roles/run.invoker (never public)", *self._notes(ctx)]
+            gate = [] if self._iam_disabled(ctx) else ["= callers need roles/run.invoker (never public)"]
+            details += [f"+ {self._url(ctx)}", *gate, *self._notes(ctx)]
             return Change(self.key, Action.CREATE, name, details)
         details: list[str] = []
         data: dict[str, Any] = {}
@@ -333,17 +343,19 @@ class ServiceResource(Resource):
                 )
             details.append("~ adopt existing service")
             data["adopt"] = True
-        if live.get("invokerIamDisabled"):
-            details.append("! invoker IAM check was disabled outside agentless; turning it back on")
-        details += self._notes(ctx)
+        if bool(live.get("invokerIamDisabled")) != self._iam_disabled(ctx):
+            if self._iam_disabled(ctx):
+                details.append("~ turn the invoker IAM check off (auth webhook)")
+            else:
+                details.append("! invoker IAM check was disabled outside agentless; turning it back on")
         changed = engine_spec.diff(st.get("spec"), desired) if st else {}
         for field, (old, new) in changed.items():
             details += engine_spec.describe(field, old, new)
         if st and self._code_changed(ctx, st):
             details.append("~ new image")
         if not details:
-            return Change(self.key, Action.NOOP, name)
-        return Change(self.key, Action.UPDATE, name, details, data=data)
+            return Change(self.key, Action.NOOP, name)  # notes only come with a change, so reruns stay no-ops
+        return Change(self.key, Action.UPDATE, name, details + self._notes(ctx), data=data)
 
     def apply(self, ctx: Context, change: Change) -> None:  # noqa: D102
         name = run_spec.service_name(ctx.project)
@@ -357,13 +369,13 @@ class ServiceResource(Resource):
             # Only the image changes; every other setting (IAP, launch stage, scaling…) stays as it is live.
             body = {k: v for k, v in live.items() if k not in _OUTPUT_ONLY}
             body["template"]["containers"][0]["image"] = image
-            body["invokerIamDisabled"] = False
+            body["invokerIamDisabled"] = self._iam_disabled(ctx)
             ctx.clients.run_service_update(name, body)
             spec = st["spec"]
         else:
             desired = self._desired(ctx, planning=False)
             spec = engine_spec.redact(desired, ctx.project.sensitive)
-            current = live is not None and not live.get("invokerIamDisabled")
+            current = live is not None and bool(live.get("invokerIamDisabled")) == self._iam_disabled(ctx)
             if current and st.get("spec") == spec and st.get("image") == image:
                 return  # a refresh with nothing new: no extra revision
             body = run_spec.api_service(desired, image)
@@ -372,6 +384,7 @@ class ServiceResource(Resource):
                 ctx.reapply.add("access")  # a recreated service starts with an empty policy
             else:
                 ctx.clients.run_service_update(name, body)
+        self._check_webhook_gate(ctx, name, url, body)
         if st.get("image") != image:
             ctx.reapply.update(_CARD_CONSUMERS)  # the agent card can change with the code
         card_url = run_spec.a2a_card_url(url, ctx.project.agent_directory) if is_a2a(ctx) else None
@@ -390,6 +403,26 @@ class ServiceResource(Resource):
         )
         ctx.echo(f"    {url}")
 
+    def _check_webhook_gate(self, ctx: Context, name: str, url: str, body: dict[str, Any]) -> None:
+        """With auth: webhook, prove anonymous calls are refused; otherwise turn IAM back on and fail (fail closed)."""
+        header = run_spec.webhook_header(ctx.project)
+        if not header:
+            return
+        try:
+            statuses = ctx.clients.webhook_probe(url, header)
+        except BaseException:  # a failed or interrupted probe proves nothing: close the service, then re-raise
+            ctx.clients.run_service_update(name, {**body, "invokerIamDisabled": False})
+            raise
+        if all(status in (401, 403) for status in statuses):
+            ctx.echo(f"    anonymous calls refused ({', '.join(map(str, statuses))}); {header} gates the service")
+            return
+        ctx.clients.run_service_update(name, {**body, "invokerIamDisabled": False})
+        raise RuntimeError(
+            f"auth webhook: {url} answered {statuses[0]} without {header} and {statuses[1]} with a wrong one; "
+            f"the container must answer 401 or 403 to every request without the secret (AGENTLESS_WEBHOOK_SECRET "
+            "in AGENTLESS_WEBHOOK_HEADER), on every path including /. The invoker IAM check is back on."
+        )
+
     def plan_destroy(self, ctx: Context) -> Change:  # noqa: D102
         st = self._state(ctx)
         if not st:
@@ -404,7 +437,10 @@ class ServiceResource(Resource):
 
 
 class InvokerResource(AccessResource):
-    """Who may call the service: roles/run.invoker bindings on it. Public members are never granted or tolerated."""
+    """Who may call the service: roles/run.invoker bindings on it. Public members are never granted or tolerated.
+
+    With auth: webhook the IAM check is off and the container gates calls; an allUsers grant still blocks.
+    """
 
     rtype = "runService"
     noun = "service"
