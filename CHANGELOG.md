@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-29
+
 ### Security
 - **Vulnerable dependencies updated:** certifi 2026.10.23 (GHSA-6q48-6c7w-9gw2, compromised emSign CAs),
   aiohttp 3.14.5, opentelemetry 1.45.1 and, through `google-cloud-aiplatform` 2.6.0, litellm 1.96.2.
@@ -194,7 +196,8 @@ First public release: wheel and sdist (`agentless-cli`) on the GitHub Release, a
 - Plugins through pluggy entry points in the `agentless` group.
 - Multi-arch container image and Claude Code skills for developing agentless and deploying agents with it.
 
-[Unreleased]: https://github.com/Aymen2518/agentless/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/Aymen2518/agentless/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/Aymen2518/agentless/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/Aymen2518/agentless/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/Aymen2518/agentless/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/Aymen2518/agentless/compare/v0.5.0...v0.6.0
