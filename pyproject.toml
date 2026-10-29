@@ -29,7 +29,7 @@ dependencies = [
     "pluggy>=1.5",
     "google-auth>=2.38",
     "requests>=2.32",
-    "google-cloud-aiplatform[agent-engines]>=1.163.0,<2",
+    "google-cloud-aiplatform[agent-engines]>=2.6.0,<3",
     "google-cloud-resource-manager>=1.14",
     "google-cloud-iam>=2.18",
     "google-cloud-secret-manager>=2.23",
@@ -39,7 +39,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-eval = ["google-cloud-aiplatform[agent-engines,evaluation]>=1.163.0,<2"]
+eval = ["google-cloud-aiplatform[agent-engines,evaluation]>=2.6.0,<3"]
 
 [project.urls]
 Homepage = "https://aymen2518.github.io/agentless"

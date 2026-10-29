@@ -1,0 +1,34 @@
+{
+  "@context": "https://openvex.dev/ns/v0.2.0",
+  "@id": "Aymen2518/agentless:vex-2026-10-29",
+  "author": "agentless maintainers",
+  "timestamp": "2026-10-29T00:00:00Z",
+  "version": 1,
+  "statements": [
+    {
+      "vulnerability": {
+        "name": "CVE-2026-114612",
+        "description": "LiteLLM: Privilege Escalation to Proxy Admin via Cross-Domain Reuse of the Salt Key"
+      },
+      "products": [
+        {
+          "@id": "pkg:pypi/agentless-cli",
+          "identifiers": {
+            "purl": "pkg:pypi/agentless-cli"
+          },
+          "subcomponents": [
+            {
+              "@id": "pkg:pypi/litellm",
+              "identifiers": {
+                "purl": "pkg:pypi/litellm"
+              }
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "litellm is only installed with the optional `eval` extra, through google-cloud-aiplatform[evaluation], which calls it as a client library during evaluation runs. agentless never imports litellm and never runs the LiteLLM proxy server, where the vulnerable salt-key handling lives. It is not in the Docker image. The fix (>= 1.100.4) is blocked by google-cloud-aiplatform 2.6.0 capping litellm < 1.97; drop this statement once that cap is raised."
+    }
+  ]
+}
