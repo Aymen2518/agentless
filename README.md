@@ -618,7 +618,7 @@ cloudRun:
   are rejected: IAM grants nothing here, and Gemini Enterprise and the Agent Registry can't send the secret.
 - **The container** gets `AGENTLESS_AUTH_MODE=webhook`, `AGENTLESS_WEBHOOK_HEADER`, and `AGENTLESS_WEBHOOK_SECRET`
   (read from Secret Manager by Cloud Run, never by agentless). The runtime SA gets `secretAccessor` on that secret.
-  The container must answer **401 or 403 to every request, on every path,** unless the header matches. Compare the
+  The container must answer **401 or 403 to every request, on every path, WebSockets included,** unless the header matches. Compare the
   two values in constant time.
 - **agentless checks it after every rollout (fail closed).** It calls `GET /` with no credentials, once without the
   header and once with a wrong value. If either answer isn't 401 or 403, it turns the invoker IAM check back on and
@@ -629,26 +629,37 @@ cloudRun:
 - The secret is all that protects the service: rotate it in Secret Manager and in the webhook together. Keep
   `ingress: all` for SaaS senders. A self-hosted GitLab in your VPC can use `ingress: internal` on top.
 
-The check in an agents-cli FastAPI app (`app/fast_api_app.py`):
+The check in an agents-cli FastAPI app (`app/fast_api_app.py`). It must be a pure ASGI middleware: an
+`@app.middleware("http")` never sees WebSocket connections, so the ADK `/run_live` socket would stay open. Serve
+only the paths the sender needs, so a leaked secret can't drive the agent through the ADK API:
 
 ```python
 import hmac
 import os
 
-from fastapi import Request
-from fastapi.responses import JSONResponse
-
-HEADER = os.environ.get("AGENTLESS_WEBHOOK_HEADER")
-SECRET = os.environ.get("AGENTLESS_WEBHOOK_SECRET", "").encode()
+ALLOWED_PATHS = {"/webhook"}
 
 
-@app.middleware("http")
-async def verify_webhook_secret(request: Request, call_next):
-    if os.environ.get("AGENTLESS_AUTH_MODE") == "webhook":
-        sent = request.headers.get(HEADER or "", "").encode()
-        if not SECRET or not hmac.compare_digest(sent, SECRET):
-            return JSONResponse({"error": "unauthorized"}, status_code=401)
-    return await call_next(request)
+class WebhookGate:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] not in ("http", "websocket") or os.environ.get("AGENTLESS_AUTH_MODE") != "webhook":
+            return await self.app(scope, receive, send)
+        header = os.environ["AGENTLESS_WEBHOOK_HEADER"].encode()
+        secret = os.environ.get("AGENTLESS_WEBHOOK_SECRET", "").encode()
+        sent = dict(scope.get("headers") or []).get(header, b"")
+        ok = bool(secret) and hmac.compare_digest(sent, secret)
+        if ok and scope["path"] in ALLOWED_PATHS:
+            return await self.app(scope, receive, send)
+        if scope["type"] == "websocket":
+            return await send({"type": "websocket.close", "code": 1008})
+        await send({"type": "http.response.start", "status": 401 if not ok else 404, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+
+app.add_middleware(WebhookGate)
 ```
 
 **Not supported on Cloud Run yet:** `eval`, `evaluation.afterDeploy`, `evaluation.monitors`, `deploy --no-wait` /
