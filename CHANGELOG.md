@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-10-29
+
 ### Changed
 - **Plan colours like Terraform.** Detail lines now take the colour of their marker: green `+` added, yellow `~`
   changed, red `-` removed, so a dropped env var or revoked binding inside an update stands out. Replaces are
@@ -230,7 +232,8 @@ First public release: wheel and sdist (`agentless-cli`) on the GitHub Release, a
 - Plugins through pluggy entry points in the `agentless` group.
 - Multi-arch container image and Claude Code skills for developing agentless and deploying agents with it.
 
-[Unreleased]: https://github.com/Aymen2518/agentless/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/Aymen2518/agentless/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/Aymen2518/agentless/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/Aymen2518/agentless/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/Aymen2518/agentless/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/Aymen2518/agentless/compare/v0.7.1...v0.8.0
