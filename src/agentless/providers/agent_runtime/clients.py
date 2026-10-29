@@ -265,12 +265,17 @@ class GcpClients:
             http_options={"api_version": "v1beta1"},
         )
 
+    @functools.cached_property
+    def _engines(self) -> Any:
+        # google-cloud-aiplatform 2.x renamed `agent_engines` to `runtimes` (same methods)
+        return getattr(self._vertex, "runtimes", None) or self._vertex.agent_engines
+
     def engine_get(self, name: str) -> dict[str, Any] | None:
         """Engine summary, or None when it no longer exists."""
         from google.genai import errors
 
         try:
-            resource = self._vertex.agent_engines.get(name=name).api_resource
+            resource = self._engines.get(name=name).api_resource
         except errors.ClientError as e:
             if e.code == 404:
                 return None
@@ -287,7 +292,7 @@ class GcpClients:
         """Names of engines with this display name (used to adopt agents-cli deployments)."""
         return [
             e.api_resource.name
-            for e in self._vertex.agent_engines.list(config={"filter": f'display_name="{display_name}"'})
+            for e in self._engines.list(config={"filter": f'display_name="{display_name}"'})
             if e.api_resource.display_name == display_name
         ]
 
@@ -297,7 +302,7 @@ class GcpClients:
         """Build `spec.source_code_spec` (inline tarball) using the SDK, as agents-cli does."""
         with contextlib.chdir(source_dir):
             try:
-                cfg = self._vertex.agent_engines._create_config(
+                cfg = self._engines._create_config(
                     mode="update",
                     source_packages=source_packages,
                     image_spec={"build_args": build_args} if build_args else {},
@@ -310,7 +315,7 @@ class GcpClients:
 
     def engine_create(self, config: dict[str, Any]) -> str:
         """Start a create; returns the operation name."""
-        return self._vertex.agent_engines._create(config=config).name
+        return self._engines._create(config=config).name
 
     def engine_create_identity(
         self, display_name: str, labels: dict[str, str], encryption_spec: dict[str, str] | None
@@ -319,16 +324,16 @@ class GcpClients:
         config: dict[str, Any] = {"identity_type": "AGENT_IDENTITY", "display_name": display_name, "labels": labels}
         if encryption_spec:
             config["encryption_spec"] = encryption_spec
-        agent = self._vertex.agent_engines.create(config=config)
+        agent = self._engines.create(config=config)
         return {"name": agent.api_resource.name, "effective_identity": agent.api_resource.spec.effective_identity}
 
     def engine_update(self, name: str, config: dict[str, Any]) -> str:
         """Start an update; returns the operation name."""
-        return self._vertex.agent_engines._update(name=name, config=config).name
+        return self._engines._update(name=name, config=config).name
 
     def operation_status(self, operation: str) -> tuple[bool, str | None]:
         """(done, error message) of an engine operation."""
-        op = self._vertex.agent_engines._get_agent_operation(operation_name=operation)
+        op = self._engines._get_agent_operation(operation_name=operation)
         return bool(op.done), str(op.error) if op.error else None
 
     def wait(self, operation: str, on_tick: Callable[[float], None] | None = None, poll: float = 10) -> None:
@@ -349,7 +354,7 @@ class GcpClients:
         from google.genai import errors
 
         try:
-            operation = self._vertex.agent_engines.delete(name=name, force=True)
+            operation = self._engines.delete(name=name, force=True)
         except errors.ClientError as e:
             if e.code == 404:
                 return

@@ -7,6 +7,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Security
+- **Vulnerable dependencies updated:** certifi 2026.10.23 (GHSA-6q48-6c7w-9gw2, compromised emSign CAs),
+  aiohttp 3.14.5, opentelemetry 1.45.1 and, through `google-cloud-aiplatform` 2.6.0, litellm 1.96.2.
+  `.vex/agentless.openvex.json` marks litellm CVE-2026-114612 (LiteLLM proxy only) as not affected until
+  aiplatform allows litellm >= 1.100.4.
 - **Cloud Run sessions grant scoped to the engine:** the runtime SA gets `roles/aiplatform.user` on the companion
   session engine only, not on the project. Declare model access in `identity.roles` (as on Agent Runtime).
 - **`deploy --code-only` on Cloud Run** keeps every live service setting (IAP and launch stage were dropped), and no
@@ -35,6 +39,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `plan` and `deploy`.
 
 ### Changed
+- **`google-cloud-aiplatform` 2.x** (`>=2.6.0,<3`). Agent Runtime calls go through the SDK's `runtimes`
+  (renamed from `agent_engines`), with a fallback for 1.x.
 - The manifest's `deployment_target` must match `provider.name`.
 - `agentless invoke` exits 1 with the agent's error when the stream carries one, instead of printing nothing.
 - Provider orchestration moved to `providers/base.py` (`BaseProvider`). Imports from
