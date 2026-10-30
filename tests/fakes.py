@@ -28,6 +28,9 @@ class FakeGcp:
         self.bucket_objects: dict[str, int] = defaultdict(int)
         self.absent_buckets: set[str] = set()  # IAM targets that do not exist (others are assumed to)
         self.run_services: dict[str, dict[str, Any]] = {}
+        self.run_tags: dict[str, dict[str, str]] = defaultdict(dict)  # service -> namespaced value -> binding
+        # Simulated run.allowedIngress org policy: when set, ingress all needs this tag on the service itself.
+        self.ingress_all_tag: str | None = None
         self.ar_repositories: set[str] = {"cloud-run-source-deploy"}
         self.ar_images: dict[str, str] = {}  # image:tag -> digest
         self.uploads: dict[tuple[str, str], int] = {}  # (bucket, object) -> size
@@ -205,9 +208,19 @@ class FakeGcp:
         service = self.run_services.get(name)
         return None if service is None else json.loads(json.dumps(service))
 
+    def _allowed_ingress(self, name: str, body: dict[str, Any]) -> None:
+        tag = self.ingress_all_tag
+        if (
+            tag
+            and body.get("ingress", "INGRESS_TRAFFIC_ALL") == "INGRESS_TRAFFIC_ALL"
+            and tag not in self.run_tags[name]
+        ):
+            raise RuntimeError("400 Constraint constraints/run.allowedIngress violated: ingress all")
+
     def run_service_create(self, name: str, body: dict[str, Any]) -> dict[str, Any]:
         if name in self.run_services:
             raise RuntimeError(f"409 service {name} already exists")
+        self._allowed_ingress(name, body)
         image = body["template"]["containers"][0]["image"]
         if ":" not in image.rsplit("/", 1)[-1] and "@" not in image:
             raise RuntimeError(f"400 image {image} has no tag or digest")
@@ -219,6 +232,7 @@ class FakeGcp:
     def run_service_update(self, name: str, body: dict[str, Any]) -> dict[str, Any]:
         if name not in self.run_services:
             raise RuntimeError(f"404 service {name} not found")
+        self._allowed_ingress(name, body)
         self.calls.append(("run_update", name, body))
         uri = self.run_services[name]["uri"]
         self.run_services[name] = {**json.loads(json.dumps(body)), "uri": uri}
@@ -228,6 +242,25 @@ class FakeGcp:
         self.calls.append(("run_delete", name))
         self.run_services.pop(name, None)
         self.policies.pop(("runService", name), None)
+        self.run_tags.pop(name, None)  # tag bindings go with the resource
+
+    def run_service_tags(self, name: str) -> dict[str, str]:
+        return dict(self.run_tags.get(name, {}))
+
+    def run_service_tag(self, name: str, value: str) -> None:
+        if name not in self.run_services:
+            raise RuntimeError(f"404 service {name} not found")
+        if value in self.run_tags[name]:
+            raise RuntimeError(f"409 tag {value} already bound on {name}")
+        self.calls.append(("run_tag", name, value))
+        self.run_tags[name][value] = f"tagBindings/{name.replace('/', '%2F')}/tagValues/{next(self._ids)}"
+
+    def run_service_untag(self, binding: str) -> None:
+        self.calls.append(("run_untag", binding))
+        for tags in self.run_tags.values():
+            for value, name in list(tags.items()):
+                if name == binding:
+                    tags.pop(value)
 
     # Artifact Registry / Cloud Build
     def ar_repository_exists(self, repository: str) -> bool:

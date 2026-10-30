@@ -6,6 +6,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-30
+
+### Added
+- **Tags on Cloud Run services, `cloudRun.tags`.** For org policies that check a tag on the service itself, such as
+  `run.allowedIngress` allowing `ingress: all` only on tagged services. A new service is created closed (ingress
+  internal, invoker IAM check on), tagged, then given its settings, so it's never reachable before its tags are.
+  On an existing service, new tags are bound before the update and dropped ones unbound after it. Tags bound outside
+  agentless are never removed. The deployer needs `roles/resourcemanager.tagUser` on each tag value.
+
 ## [0.10.1] - 2026-10-29
 
 ### Changed
@@ -232,7 +241,8 @@ First public release: wheel and sdist (`agentless-cli`) on the GitHub Release, a
 - Plugins through pluggy entry points in the `agentless` group.
 - Multi-arch container image and Claude Code skills for developing agentless and deploying agents with it.
 
-[Unreleased]: https://github.com/Aymen2518/agentless/compare/v0.10.1...HEAD
+[Unreleased]: https://github.com/Aymen2518/agentless/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/Aymen2518/agentless/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/Aymen2518/agentless/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/Aymen2518/agentless/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/Aymen2518/agentless/compare/v0.8.0...v0.9.0

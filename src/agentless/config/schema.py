@@ -231,6 +231,22 @@ class CloudRun(_Model):
     cpu_throttling: bool = Field(default=False, description="Only allocate CPU during requests.")
     session_affinity: bool = True
     port: int = Field(default=8080, ge=1, le=65535)
+    tags: dict[str, str] = Field(
+        default_factory=dict,
+        description="Resource Manager tags bound on the service, `<org or project id>/<key short name>: <value short "
+        "name>`, for org policies that check a tag on the service (e.g. `run.allowedIngress`). A new service is "
+        "created closed (ingress internal, IAM check on), tagged, then given its settings.",
+    )
+
+    @field_validator("tags")
+    @classmethod
+    def _tags(cls, v: dict[str, str]) -> dict[str, str]:
+        for key, value in v.items():
+            if not re.fullmatch(r"[^/\s]+/[^/\s]+", key):
+                raise ValueError(f"tag key {key!r} must be <org or project id>/<key short name>")
+            if not re.fullmatch(r"[^/\s]+", value):
+                raise ValueError(f"tag {key}: value {value!r} must be a short name (no '/')")
+        return dict(sorted(v.items()))
 
     @field_validator("timeout")
     @classmethod

@@ -312,6 +312,25 @@ class ServiceResource(Resource):
     def _iam_disabled(ctx: Context) -> bool:
         return run_spec.webhook_header(ctx.project) is not None
 
+    @staticmethod
+    def _tags(ctx: Context) -> list[str]:
+        """Namespaced tag values (`<parent>/<key>/<value>`) cloudRun.tags binds on the service."""
+        run = ctx.project.config.cloud_run
+        return sorted(f"{key}/{value}" for key, value in (run.tags if run else {}).items())
+
+    def _tag_diff(self, ctx: Context, name: str, st: dict[str, Any]) -> tuple[list[str], dict[str, str]]:
+        """Tags to bind, and the bindings agentless made that are no longer wanted (value -> binding name).
+
+        A wanted tag that was already bound outside agentless is left alone and never recorded as owned.
+        """
+        wanted = self._tags(ctx)
+        if not wanted and not st.get("tags"):
+            return [], {}  # nothing to bind or unbind: no call (and no tag permission) needed
+        live = ctx.clients.run_service_tags(name)
+        return [t for t in wanted if t not in live], {
+            t: live[t] for t in st.get("tags", []) if t not in wanted and t in live
+        }
+
     def _code_changed(self, ctx: Context, st: dict[str, Any]) -> bool:
         run = ctx.project.config.cloud_run
         if run and run.image:
@@ -326,7 +345,8 @@ class ServiceResource(Resource):
         if live is None:
             details = ["! deleted outside agentless; recreating"] if st else []
             gate = [] if self._iam_disabled(ctx) else ["= callers need roles/run.invoker (never public)"]
-            details += [f"+ {self._url(ctx)}", *gate, *self._notes(ctx)]
+            tags = [f"+ tag {t} (bound before the service opens)" for t in self._tags(ctx)]
+            details += [f"+ {self._url(ctx)}", *gate, *tags, *self._notes(ctx)]
             return Change(self.key, Action.CREATE, name, details)
         details: list[str] = []
         data: dict[str, Any] = {}
@@ -353,6 +373,8 @@ class ServiceResource(Resource):
             details += engine_spec.describe(field, old, new)
         if st and self._code_changed(ctx, st):
             details.append("~ new image")
+        add, remove = self._tag_diff(ctx, name, st)
+        details += [f"+ tag {t}" for t in add] + [f"- tag {t}" for t in remove]
         if not details:
             return Change(self.key, Action.NOOP, name)  # notes only come with a change, so reruns stay no-ops
         return Change(self.key, Action.UPDATE, name, details + self._notes(ctx), data=data)
@@ -365,25 +387,34 @@ class ServiceResource(Resource):
         live = ctx.clients.run_service_get(name)
         st = self._state(ctx)
         url = self._url(ctx)
+        wanted_tags = self._tags(ctx)
+        add, remove = self._tag_diff(ctx, name, st) if live is not None else (wanted_tags, {})
+        tags = sorted((set(st.get("tags", [])) & set(wanted_tags)) | set(add))
         if ctx.options.code_only and live is not None and st.get("spec") is not None:
             # Only the image changes; every other setting (IAP, launch stage, scaling…) stays as it is live.
             body = {k: v for k, v in live.items() if k not in _OUTPUT_ONLY}
             body["template"]["containers"][0]["image"] = image
             body["invokerIamDisabled"] = self._iam_disabled(ctx)
+            self._bind(ctx, name, add)
             ctx.clients.run_service_update(name, body)
             spec = st["spec"]
         else:
             desired = self._desired(ctx, planning=False)
             spec = engine_spec.redact(desired, ctx.project.sensitive)
             current = live is not None and bool(live.get("invokerIamDisabled")) == self._iam_disabled(ctx)
-            if current and st.get("spec") == spec and st.get("image") == image:
+            unchanged = current and st.get("spec") == spec and st.get("image") == image
+            if unchanged and not add and not remove:
                 return  # a refresh with nothing new: no extra revision
             body = run_spec.api_service(desired, image)
             if live is None:
-                ctx.clients.run_service_create(name, body)
+                self._create(ctx, name, body, wanted_tags)
                 ctx.reapply.add("access")  # a recreated service starts with an empty policy
             else:
-                ctx.clients.run_service_update(name, body)
+                self._bind(ctx, name, add)  # before the update: a tag may be what allows the new settings
+                if not unchanged:  # a tag change alone makes no new revision
+                    ctx.clients.run_service_update(name, body)
+        for binding in remove.values():  # after the update: the old settings may have needed it
+            ctx.clients.run_service_untag(binding)
         self._check_webhook_gate(ctx, name, url, body)
         if st.get("image") != image:
             ctx.reapply.update(_CARD_CONSUMERS)  # the agent card can change with the code
@@ -398,10 +429,33 @@ class ServiceResource(Resource):
                 **({"cardUrl": card_url} if card_url else {}),
                 "image": image,
                 **({"build": build} if build else {}),
+                **({"tags": tags} if tags else {}),
                 "spec": spec,
             },
         )
         ctx.echo(f"    {url}")
+
+    @staticmethod
+    def _bind(ctx: Context, name: str, tags: list[str]) -> None:
+        for tag in tags:
+            ctx.clients.run_service_tag(name, tag)
+            ctx.echo(f"    tagged {tag}")
+
+    def _create(self, ctx: Context, name: str, body: dict[str, Any], tags: list[str]) -> None:
+        """Create the service; with tags, create it closed, tag it, then apply its settings.
+
+        Org policies such as run.allowedIngress check the tags of the service itself, and a service can only be
+        tagged once it exists. It starts with ingress internal and the invoker IAM check on, so it is never reachable
+        before its tags are.
+        """
+        if not tags:
+            ctx.clients.run_service_create(name, body)
+            return
+        closed = {**body, "ingress": run_spec.INGRESS["internal"], "invokerIamDisabled": False}
+        ctx.clients.run_service_create(name, closed)
+        self._bind(ctx, name, tags)
+        if closed != body:
+            ctx.clients.run_service_update(name, body)
 
     def _check_webhook_gate(self, ctx: Context, name: str, url: str, body: dict[str, Any]) -> None:
         """With auth: webhook, prove anonymous calls are refused; otherwise turn IAM back on and fail (fail closed)."""
