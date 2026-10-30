@@ -350,7 +350,7 @@
     },
     "CloudRun": {
       "additionalProperties": false,
-      "description": "Cloud Run service settings (provider.name: cloud-run); callers need roles/run.invoker unless auth: webhook.",
+      "description": "Cloud Run service settings (provider.name: cloud-run); callers need roles/run.invoker (allUsers with webhook).",
       "properties": {
         "serviceName": {
           "anyOf": [
@@ -418,7 +418,7 @@
         },
         "auth": {
           "default": "iam",
-          "description": "iam: Cloud Run checks the caller's ID token (Authorization). googleToken: Cloud Run still checks it, sent as X-Serverless-Authorization, and the container also verifies the Google token in googleToken.header. webhook: for callers that cannot get a Google token (GitLab, GitHub webhooks): Cloud Run's invoker IAM check is off and the container must reject every request without the secret in webhook.header; agentless checks that it does after each rollout and turns IAM back on if not.",
+          "description": "iam: Cloud Run checks the caller's ID token (Authorization). googleToken: Cloud Run still checks it, sent as X-Serverless-Authorization, and the container also verifies the Google token in googleToken.header. webhook: for callers that cannot get a Google token (GitLab, GitHub webhooks): the IAM check stays on, allUsers is granted roles/run.invoker, and the container must reject every request without the secret in webhook.header; agentless checks that it does after each rollout and revokes allUsers if not. Under Domain Restricted Sharing, add the org's exemption tag in cloudRun.tags.",
           "enum": [
             "iam",
             "googleToken",
@@ -1541,7 +1541,7 @@
     },
     "Webhook": {
       "additionalProperties": false,
-      "description": "Shared-secret gate of `cloudRun.auth: webhook`, checked by the container: Cloud Run's IAM check is off.",
+      "description": "Shared-secret gate of `cloudRun.auth: webhook`, checked by the container: allUsers holds roles/run.invoker.",
       "properties": {
         "header": {
           "default": "x-gitlab-token",

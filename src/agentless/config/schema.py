@@ -176,7 +176,7 @@ class SecretRef(_Model):
 
 
 class Webhook(_Model):
-    """Shared-secret gate of `cloudRun.auth: webhook`, checked by the container: Cloud Run's IAM check is off."""
+    """Shared-secret gate of `cloudRun.auth: webhook`, checked by the container: allUsers holds roles/run.invoker."""
 
     header: str = Field(
         default="x-gitlab-token",
@@ -195,7 +195,7 @@ class Webhook(_Model):
 
 
 class CloudRun(_Model):
-    """Cloud Run service settings (provider.name: cloud-run); callers need roles/run.invoker unless auth: webhook."""
+    """Cloud Run service settings (provider.name: cloud-run); callers need roles/run.invoker (allUsers with webhook)."""
 
     service_name: str | None = Field(
         default=None, pattern=r"^[a-z]([a-z0-9-]{0,47}[a-z0-9])?$", description="Defaults to <service>-<stage>."
@@ -221,8 +221,9 @@ class CloudRun(_Model):
         description="iam: Cloud Run checks the caller's ID token (Authorization). googleToken: Cloud Run still "
         "checks it, sent as X-Serverless-Authorization, and the container also verifies the Google token in "
         "googleToken.header. webhook: for callers that cannot get a Google token (GitLab, GitHub webhooks): "
-        "Cloud Run's invoker IAM check is off and the container must reject every request without the secret in "
-        "webhook.header; agentless checks that it does after each rollout and turns IAM back on if not.",
+        "the IAM check stays on, allUsers is granted roles/run.invoker, and the container must reject every request "
+        "without the secret in webhook.header; agentless checks that it does after each rollout and revokes allUsers "
+        "if not. Under Domain Restricted Sharing, add the org's exemption tag in cloudRun.tags.",
     )
     google_token: GoogleToken | None = Field(default=None, description="Settings of auth: googleToken.")
     webhook: Webhook | None = Field(default=None, description="Settings of auth: webhook.")

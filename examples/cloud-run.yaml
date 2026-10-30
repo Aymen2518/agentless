@@ -1,5 +1,6 @@
 # yaml-language-server: $schema=../schema/agent.schema.json
-# An agent deployed as a Cloud Run service. Callers always need roles/run.invoker: the service is never public.
+# An agent deployed as a Cloud Run service. Callers always need roles/run.invoker: the service is never public
+# (except with auth: webhook, where allUsers holds it and the container checks a shared secret).
 service: support-agent
 
 provider:
@@ -27,8 +28,9 @@ cloudRun:
   # googleToken:                           #   Cloud Run still checks roles/run.invoker (X-Serverless-Authorization),
   #   header: x-google-token               #   then the container verifies the Google token in this header
   #   allowedPrincipals: [domain:acme.example.com]
-  # auth: webhook                          # GitLab/GitHub webhook receiver: Cloud Run IAM off, the container checks
-  # webhook:                               #   the shared secret in this header (verified after each rollout)
+  # auth: webhook                          # GitLab/GitHub webhook receiver: IAM stays on, allUsers may invoke, and
+  # webhook:                               #   the container checks the shared secret in this header (verified
+  #                                        #   after each rollout; needs the DRS exemption tag in tags)
   #   header: x-gitlab-token
   #   secret: { secret: gitlab-webhook-token }
   # tags:                                  # bound on the service before it opens (org policies such as

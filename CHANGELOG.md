@@ -6,6 +6,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+- **Behaviour change of `cloudRun.auth: webhook`: the invoker IAM check stays on, and `allUsers` holds
+  `roles/run.invoker`,** the way runway deploys a webhook receiver. 0.10 and 0.11 turned the check off
+  (`invokerIamDisabled: true`), which the `run.managed.requireInvokerIam` org policy forbids. The `allUsers` grant
+  is owned by agentless: revoked on `remove` and when switching back to `auth: iam`. Under Domain Restricted Sharing,
+  add your org's exemption tag in `cloudRun.tags`. The anonymous probe now runs right after the grant, or after each
+  new revision of a public service, and a failure revokes `allUsers` instead of turning IAM back on. A service
+  deployed by 0.10 or 0.11 gets its IAM check back on at the next deploy, then the grant (a few seconds of 403).
+
 ## [0.11.0] - 2026-10-30
 
 ### Added

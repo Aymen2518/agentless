@@ -788,25 +788,36 @@ def _secret_env(gcp: FakeGcp) -> dict[str, dict]:
     return {e["name"]: e["valueSource"]["secretKeyRef"] for e in container["env"] if "valueSource" in e}
 
 
-def test_webhook_turns_iam_off_and_hands_the_secret_to_the_container(make_run, gcp: FakeGcp, edit) -> None:
+def _all_users(gcp: FakeGcp) -> bool:
+    return "allUsers" in (gcp.iam_members("runService", SERVICE) or {}).get("roles/run.invoker", set())
+
+
+def test_webhook_keeps_iam_on_grants_all_users_and_hands_the_secret_to_the_container(
+    make_run, gcp: FakeGcp, edit
+) -> None:
     edit(_webhook)
     _, changeset = make_run().plan(DeployOptions())
     service = next(c for c in changeset.changes if c.resource == "service")
-    assert any("invoker IAM check is off" in d for d in service.details)
+    assert any("allUsers holds roles/run.invoker" in d for d in service.details)
     assert not any("never public" in d for d in service.details)
+    access = next(c for c in changeset.changes if c.resource == "access")
+    assert "+ roles/run.invoker on the service → allUsers" in access.details
     deploy(make_run())
 
-    assert _service(gcp)["invokerIamDisabled"] is True
+    assert _service(gcp)["invokerIamDisabled"] is False
+    assert _all_users(gcp)
     env = _env(gcp)
     assert env["AGENTLESS_AUTH_MODE"] == "webhook"
     assert env["AGENTLESS_WEBHOOK_HEADER"] == "x-gitlab-token"
     assert _secret_env(gcp)["AGENTLESS_WEBHOOK_SECRET"] == {"secret": "gitlab-webhook-token", "version": "latest"}
     accessors = gcp.iam_members("secret", "gitlab-webhook-token") or {}
     assert accessors.get("roles/secretmanager.secretAccessor")  # the runtime SA reads it
-    assert ("webhook_probe", URL, "x-gitlab-token") in gcp.calls
-    members = gcp.iam_members("runService", SERVICE) or {}
-    assert not {"allUsers", "allAuthenticatedUsers"} & {m for ms in members.values() for m in ms}
-    assert actions(make_run())["service"] == Action.NOOP
+    kinds = gcp.kinds()
+    assert kinds.count("webhook_probe") == 1
+    grant = next(i for i, c in enumerate(gcp.calls) if c[0] == "iam" and c[1] == "runService")
+    assert grant < kinds.index("webhook_probe")  # probed once public
+    plan = actions(make_run())
+    assert plan["service"] == Action.NOOP and plan["access"] == Action.NOOP
 
 
 def test_webhook_fails_closed_when_the_container_lets_anonymous_calls_in(make_run, gcp: FakeGcp, edit) -> None:
@@ -814,12 +825,14 @@ def test_webhook_fails_closed_when_the_container_lets_anonymous_calls_in(make_ru
     gcp.webhook_statuses = (200, 401)
     with pytest.raises(RuntimeError, match="answered 200 without x-gitlab-token"):
         deploy(make_run())
-    assert _service(gcp)["invokerIamDisabled"] is False  # IAM is back on
+    assert not _all_users(gcp)  # revoked
+    assert _service(gcp)["invokerIamDisabled"] is False
 
-    gcp.webhook_statuses = (401, 401)  # the app is fixed: the next deploy turns IAM off again
-    assert actions(make_run())["service"] == Action.UPDATE
+    gcp.webhook_statuses = (401, 401)  # the app is fixed: the next deploy grants allUsers again and probes
+    assert actions(make_run())["access"] != Action.NOOP
     deploy(make_run())
-    assert _service(gcp)["invokerIamDisabled"] is True
+    assert _all_users(gcp)
+    assert gcp.kinds().count("webhook_probe") == 2
 
 
 def test_webhook_rejects_a_wrong_token_too(make_run, gcp: FakeGcp, edit) -> None:
@@ -827,12 +840,13 @@ def test_webhook_rejects_a_wrong_token_too(make_run, gcp: FakeGcp, edit) -> None
     gcp.webhook_statuses = (401, 200)  # checks the header is present, not its value
     with pytest.raises(RuntimeError, match="200 with a wrong one"):
         deploy(make_run())
-    assert _service(gcp)["invokerIamDisabled"] is False
+    assert not _all_users(gcp)
 
 
 @pytest.mark.parametrize("error", [RuntimeError("probe crashed"), KeyboardInterrupt()])
 def test_webhook_fails_closed_when_the_probe_itself_fails(make_run, gcp: FakeGcp, edit, error) -> None:
     edit(_webhook)
+    real = gcp.webhook_probe
 
     def broken(_url: str, _header: str) -> list[int]:
         raise error
@@ -840,7 +854,23 @@ def test_webhook_fails_closed_when_the_probe_itself_fails(make_run, gcp: FakeGcp
     gcp.webhook_probe = broken  # type: ignore[method-assign]
     with pytest.raises(type(error)):
         deploy(make_run())
-    assert _service(gcp)["invokerIamDisabled"] is False
+    assert not _all_users(gcp)
+
+    gcp.webhook_probe = real  # type: ignore[method-assign]
+    deploy(make_run())
+    assert _all_users(gcp)
+
+
+def test_a_new_revision_of_a_public_webhook_service_is_probed_and_fails_closed(
+    make_run, gcp: FakeGcp, run_dir: Path, edit
+) -> None:
+    edit(_webhook)
+    deploy(make_run())
+    (run_dir / "app" / "agent.py").write_text("# changed\n")
+    gcp.webhook_statuses = (200, 200)  # the new code dropped the gate
+    with pytest.raises(RuntimeError, match="answered 200"):
+        deploy(make_run())
+    assert not _all_users(gcp)
 
 
 def test_webhook_probe_timeouts_count_as_not_refused(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -857,45 +887,74 @@ def test_webhook_probe_timeouts_count_as_not_refused(monkeypatch: pytest.MonkeyP
     assert statuses == [0, 0]
 
 
-def test_switching_from_webhook_back_to_iam_turns_the_check_back_on(make_run, gcp: FakeGcp, edit) -> None:
+def test_switching_from_webhook_back_to_iam_revokes_all_users(make_run, gcp: FakeGcp, edit) -> None:
     edit(_webhook)
     deploy(make_run())
     edit(lambda d: d.update(cloudRun={}))
     _, changeset = make_run().plan(DeployOptions())
     service = next(c for c in changeset.changes if c.resource == "service")
     assert any("- secret_env.AGENTLESS_WEBHOOK_SECRET" in d for d in service.details)
+    access = next(c for c in changeset.changes if c.resource == "access")
+    assert "- roles/run.invoker on the service → allUsers" in access.details
     deploy(make_run())
-    assert _service(gcp)["invokerIamDisabled"] is False
+    assert not _all_users(gcp)
     assert not any(k.startswith("AGENTLESS_") for k in {**_env(gcp), **_secret_env(gcp)})
     assert gcp.kinds().count("webhook_probe") == 1
 
 
-def test_iam_disabled_outside_agentless_is_kept_off_in_webhook_mode(make_run, gcp: FakeGcp, edit) -> None:
+def test_a_service_deployed_with_iam_off_gets_it_back_on(make_run, gcp: FakeGcp, edit) -> None:
     edit(_webhook)
     deploy(make_run())
-    gcp.run_services[SERVICE]["invokerIamDisabled"] = False
+    gcp.run_services[SERVICE]["invokerIamDisabled"] = True  # how agentless 0.10 and 0.11 deployed webhook mode
     _, changeset = make_run().plan(DeployOptions())
     service = next(c for c in changeset.changes if c.resource == "service")
-    assert any("turn the invoker IAM check off" in d for d in service.details)
+    assert "~ turn the invoker IAM check back on (auth webhook now grants allUsers)" in service.details
     deploy(make_run())
-    assert _service(gcp)["invokerIamDisabled"] is True
+    assert _service(gcp)["invokerIamDisabled"] is False
+    assert _all_users(gcp)
+    assert actions(make_run())["service"] == Action.NOOP
 
 
-def test_webhook_code_only_keeps_iam_off_and_probes(make_run, gcp: FakeGcp, run_dir: Path, edit) -> None:
+def test_webhook_code_only_keeps_all_users_and_probes_once(make_run, gcp: FakeGcp, run_dir: Path, edit) -> None:
     edit(_webhook)
     deploy(make_run())
     (run_dir / "app" / "agent.py").write_text("# changed\n")
     deploy(make_run(), code_only=True)
-    assert _service(gcp)["invokerIamDisabled"] is True
+    assert _service(gcp)["invokerIamDisabled"] is False
+    assert _all_users(gcp)
     assert gcp.kinds().count("webhook_probe") == 2
 
 
-def test_a_public_grant_still_blocks_in_webhook_mode(make_run, gcp: FakeGcp, edit) -> None:
+@pytest.mark.parametrize(
+    "binding", [("roles/run.invoker", "allAuthenticatedUsers"), ("roles/run.developer", "allUsers")]
+)
+def test_other_public_grants_still_block_in_webhook_mode(make_run, gcp: FakeGcp, edit, binding) -> None:
     edit(_webhook)
     deploy(make_run())
-    gcp.iam_modify("runService", SERVICE, [("roles/run.invoker", "allUsers")], [])
+    gcp.iam_modify("runService", SERVICE, [binding], [])
     with pytest.raises(DeployError, match="callable through IAM"):
         deploy(make_run(), force=True)
+
+
+def test_webhook_under_org_policies_deploys_with_both_tags(make_run, gcp: FakeGcp, edit) -> None:
+    gcp.require_invoker_iam = True
+    gcp.ingress_all_tag = INGRESS_TAG
+    gcp.all_users_tag = USERS_TAG
+    edit(lambda d: (_webhook(d), _tags(INGRESS_TAG, USERS_TAG)(d)))
+    deploy(make_run())
+    assert _service(gcp)["ingress"] == "INGRESS_TRAFFIC_ALL"
+    assert _all_users(gcp)
+    assert gcp.kinds().count("webhook_probe") == 1
+
+
+def test_webhook_all_users_grant_fails_without_the_sharing_tag(make_run, gcp: FakeGcp, edit) -> None:
+    gcp.require_invoker_iam = True
+    gcp.ingress_all_tag = INGRESS_TAG
+    gcp.all_users_tag = USERS_TAG
+    edit(lambda d: (_webhook(d), _tags(INGRESS_TAG)(d)))
+    with pytest.raises(RuntimeError, match="permitted customer"):
+        deploy(make_run())
+    assert not _all_users(gcp)
 
 
 def test_webhook_header_can_be_changed(make_run, gcp: FakeGcp, edit) -> None:
@@ -1138,8 +1197,9 @@ def test_webhook_with_tags_opens_after_tagging_and_probes(make_run, gcp: FakeGcp
     edit(lambda d: (_webhook(d), _tags(INGRESS_TAG)(d)))
     deploy(make_run())
     created = next(c[2] for c in gcp.calls if c[0] == "run_create")
-    assert created["invokerIamDisabled"] is False  # closed until tagged
-    assert _service(gcp)["invokerIamDisabled"] is True
+    assert created["invokerIamDisabled"] is False
+    assert _service(gcp)["invokerIamDisabled"] is False
+    assert _all_users(gcp)
     assert gcp.kinds().index("run_tag") < gcp.kinds().index("webhook_probe")
 
 
