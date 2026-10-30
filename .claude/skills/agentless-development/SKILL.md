@@ -49,7 +49,9 @@ safely.
    impersonation covers it; a guard test fails otherwise.
 10. **Agents are never public.** No target may grant or tolerate `allUsers` / `allAuthenticatedUsers` as callers,
     and there is no `allowUnauthenticated` switch. Cloud Run services always go out with `invokerIamDisabled: false`;
-    `InvokerResource` blocks on a public grant made outside agentless (it never revokes it, see invariant 2).
+    `InvokerResource` blocks on a public grant made outside agentless (it never revokes it, see invariant 2). The one
+    exception is `cloudRun.auth: webhook`: `InvokerResource` grants `roles/run.invoker` to `allUsers` as an owned
+    binding, and the container gates calls on the shared secret, probed after each rollout (fail closed: revoke).
     agentless's own calls to a service use an ID token and never fall back to anonymous requests.
     `cloudRun.auth: googleToken` ("public" for callers outside the VPC) adds an app-level check *on top of* IAM:
     the ID token moves to `X-Serverless-Authorization`, and the container verifies the token in its own header.

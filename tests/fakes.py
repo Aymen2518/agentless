@@ -31,6 +31,10 @@ class FakeGcp:
         self.run_tags: dict[str, dict[str, str]] = defaultdict(dict)  # service -> namespaced value -> binding
         # Simulated run.allowedIngress org policy: when set, ingress all needs this tag on the service itself.
         self.ingress_all_tag: str | None = None
+        # Simulated Domain Restricted Sharing: when set, allUsers on a service needs this tag on the service itself.
+        self.all_users_tag: str | None = None
+        # Simulated run.managed.requireInvokerIam: services must keep the invoker IAM check on.
+        self.require_invoker_iam = False
         self.ar_repositories: set[str] = {"cloud-run-source-deploy"}
         self.ar_images: dict[str, str] = {}  # image:tag -> digest
         self.uploads: dict[tuple[str, str], int] = {}  # (bucket, object) -> size
@@ -79,6 +83,9 @@ class FakeGcp:
         for _, member in add:
             if member.startswith(("principal://", "principalSet://")) and ".system.id.goog/" not in member:
                 raise RuntimeError(f"400 The member {member} is of an unknown type")
+            tag = self.all_users_tag
+            if rtype == "runService" and member == "allUsers" and tag and tag not in self.run_tags[name]:
+                raise RuntimeError("412 One or more users named in the policy do not belong to a permitted customer")
         self.calls.append(("iam", rtype, name, sorted(add), sorted(remove)))
         for role, member in add:
             self.policies[(rtype, name)][role].add(member)
@@ -216,6 +223,8 @@ class FakeGcp:
             and tag not in self.run_tags[name]
         ):
             raise RuntimeError("400 Constraint constraints/run.allowedIngress violated: ingress all")
+        if self.require_invoker_iam and body.get("invokerIamDisabled"):
+            raise RuntimeError("400 Constraint constraints/run.managed.requireInvokerIam violated")
 
     def run_service_create(self, name: str, body: dict[str, Any]) -> dict[str, Any]:
         if name in self.run_services:
@@ -297,7 +306,10 @@ class FakeGcp:
 
     def webhook_probe(self, url: str, header: str) -> list[int]:
         self.calls.append(("webhook_probe", url, header))
-        return list(self.webhook_statuses)
+        host = url.split("//", 1)[-1]
+        name = next((n for n in self.run_services if host.startswith(n.rsplit("/", 1)[-1] + "-")), None)
+        public = name is not None and "allUsers" in self.policies[("runService", name)].get("roles/run.invoker", set())
+        return list(self.webhook_statuses) if public else [403, 403]  # anonymous calls hit IAM first
 
     # A2A card served by an engine (url = the engine's A2A endpoint, as agents-cli's A2A app does)
     def a2a_card(self, url: str) -> dict[str, Any] | None:

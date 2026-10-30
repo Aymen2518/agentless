@@ -507,8 +507,8 @@ access:
 **Never public** (unless you opt into [`auth: webhook`](#webhook-mode)). Every caller needs a Google identity that
 holds `roles/run.invoker`:
 
-- The service is always deployed with the invoker IAM check on. If someone turns it off, the next deploy turns it
-  back on.
+- The service is always deployed with the invoker IAM check on, in every mode. If someone turns it off, the next
+  deploy turns it back on.
 - `allUsers` and `allAuthenticatedUsers` are rejected in `access.invokers`.
 - If someone grants them on the service outside agentless, `plan` and `deploy` stop until the binding is removed.
 - `cloudRun.ingress: internal` limits where requests can come from, on top of IAM, never instead of it.
@@ -601,8 +601,9 @@ async def verify_google_token(request: Request, call_next):
 
 <a id="webhook-mode"></a>
 **Webhook receiver (`cloudRun.auth: webhook`).** GitLab and GitHub webhooks can't send a Google ID token, so they
-can't pass Cloud Run IAM. This mode is the one exception to "never public": Cloud Run's invoker IAM check is off, and
-the container lets in only requests that carry a shared secret.
+can't pass Cloud Run IAM. This mode is the one exception to "never public": the service is public through `allUsers`,
+with the invoker IAM check still on (the way runway deploys it), and the container lets in only requests that carry a
+shared secret.
 
 ```yaml
 cloudRun:
@@ -612,18 +613,36 @@ cloudRun:
     secret: { secret: gitlab-webhook-token }     # Secret Manager; version defaults to latest
 ```
 
-- **Cloud Run:** the service is deployed with `invokerIamDisabled: true`. That bypasses IAM without an `allUsers`
-  grant, so Domain Restricted Sharing doesn't block it (the `run.managed.requireInvokerIam` org policy does).
-  `allUsers` and `allAuthenticatedUsers` are still rejected and still block deploys. `access.invokers` and `publish`
-  are rejected: IAM grants nothing here, and Gemini Enterprise and the Agent Registry can't send the secret.
+- **Cloud Run:** the invoker IAM check stays on (`invokerIamDisabled: false`, so `run.managed.requireInvokerIam`
+  is satisfied), and agentless grants `roles/run.invoker` to `allUsers` on the service, as a binding it owns: it's
+  revoked on `remove` and when you switch back to `auth: iam`. `allAuthenticatedUsers`, or `allUsers` on any other
+  role, still blocks deploys. `access.invokers` and `publish` are rejected: `allUsers` already covers every caller,
+  and Gemini Enterprise and the Agent Registry can't send the secret.
+- **Domain Restricted Sharing** (`iam.allowedPolicyMemberDomains`) refuses the `allUsers` grant unless the service
+  carries your org's exemption tag. Add it in [`cloudRun.tags`](#cloud-run-tags); tags are bound before the grant.
+  With `ingress: all` under `run.allowedIngress`, add that tag too:
+
+  ```yaml
+  cloudRun:
+    auth: webhook
+    ingress: all
+    tags:
+      "123456789012/allUsersIngress": "True"
+      "123456789012/allowIngressAllForCloudRun": allow-ingress-all
+  ```
 - **The container** gets `AGENTLESS_AUTH_MODE=webhook`, `AGENTLESS_WEBHOOK_HEADER`, and `AGENTLESS_WEBHOOK_SECRET`
   (read from Secret Manager by Cloud Run, never by agentless). The runtime SA gets `secretAccessor` on that secret.
   The container must answer **401 or 403 to every request, on every path, WebSockets included,** unless the header matches. Compare the
   two values in constant time.
 - **agentless checks it after every rollout (fail closed).** It calls `GET /` with no credentials, once without the
-  header and once with a wrong value. If either answer isn't 401 or 403, it turns the invoker IAM check back on and
-  the deploy fails. The next deploy tries again. The service is reachable anonymously only from when the revision
-  serves until the check ends, a few seconds.
+  header and once with a wrong value. It probes right after granting `allUsers` on a new service, and after every
+  new revision of a public one (`--code-only` included). Cloud Run's own IAM refusal (while a fresh grant propagates)
+  doesn't count: the probe waits, up to about 6 minutes, for the container's answer. If either answer isn't 401 or
+  403, or the container never answers, it revokes `allUsers` and the deploy fails; the next deploy grants it again
+  and probes. Switching back to `auth: iam` revokes `allUsers` before the revision without the gate rolls out. The service is reachable anonymously only from when
+  the revision serves until the check ends, a few seconds.
+- **Upgrading from 0.10 or 0.11,** where webhook mode turned the IAM check off: the next deploy turns it back on,
+  then grants `allUsers`. GitLab gets 403 for the few seconds in between.
 - **`invoke`** reads the secret from Secret Manager as the deployer (or takes `--app-token`) and sends only that
   header, with no Google token. The header is dropped on a redirect to another host.
 - The secret is all that protects the service: rotate it in Secret Manager and in the webhook together. Keep

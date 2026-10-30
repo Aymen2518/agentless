@@ -14,6 +14,7 @@ INGRESS = {
 }
 EGRESS = {"private-ranges-only": "PRIVATE_RANGES_ONLY", "all-traffic": "ALL_TRAFFIC"}
 INVOKER_ROLE = "roles/run.invoker"
+ALL_USERS = "allUsers"  # the invoker of an auth: webhook service; the container checks the shared secret
 
 
 def service_name(project: Project) -> str:
@@ -125,13 +126,11 @@ def desired_spec(
         "port": run.port,
         "encryption_key": agent.encryption.kms_key,
     }
-    if run.auth == "webhook":
-        spec["invoker_iam_disabled"] = True  # only set when on, so other services' stored specs stay unchanged
     return spec
 
 
 def api_service(spec: dict[str, Any], image: str) -> dict[str, Any]:
-    """REST body of the service. The invoker IAM check is on unless auth: webhook, where the container gates calls."""
+    """REST body of the service. The invoker IAM check is always on (auth: webhook grants allUsers instead)."""
     container: dict[str, Any] = {
         "image": image,
         "ports": [{"containerPort": spec["port"]}],
@@ -167,7 +166,7 @@ def api_service(spec: dict[str, Any], image: str) -> dict[str, Any]:
         "labels": dict(spec["labels"]),
         "description": spec["description"],
         "ingress": spec["ingress"],
-        "invokerIamDisabled": bool(spec.get("invoker_iam_disabled")),
+        "invokerIamDisabled": False,  # org policies such as run.managed.requireInvokerIam forbid turning it off
         "template": template,
     }
     if spec["iap"]:

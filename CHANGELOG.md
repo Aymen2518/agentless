@@ -6,6 +6,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-10-30
+
+### Changed
+- **Behaviour change of `cloudRun.auth: webhook`: the invoker IAM check stays on, and `allUsers` holds
+  `roles/run.invoker`,** the way runway deploys a webhook receiver. 0.10 and 0.11 turned the check off
+  (`invokerIamDisabled: true`), which the `run.managed.requireInvokerIam` org policy forbids. The `allUsers` grant
+  is owned by agentless: revoked on `remove` and when switching back to `auth: iam`. Under Domain Restricted Sharing,
+  add your org's exemption tag in `cloudRun.tags`. The anonymous probe now runs right after the grant, or after each
+  new revision of a public service, and a failure revokes `allUsers` instead of turning IAM back on. A service
+  deployed by 0.10 or 0.11 gets its IAM check back on at the next deploy, then the grant (a few seconds of 403).
+
 ## [0.11.0] - 2026-10-30
 
 ### Added
@@ -241,7 +252,8 @@ First public release: wheel and sdist (`agentless-cli`) on the GitHub Release, a
 - Plugins through pluggy entry points in the `agentless` group.
 - Multi-arch container image and Claude Code skills for developing agentless and deploying agents with it.
 
-[Unreleased]: https://github.com/Aymen2518/agentless/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/Aymen2518/agentless/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/Aymen2518/agentless/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/Aymen2518/agentless/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/Aymen2518/agentless/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/Aymen2518/agentless/compare/v0.9.0...v0.10.0
