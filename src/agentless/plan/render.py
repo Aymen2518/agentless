@@ -16,13 +16,13 @@ _STYLE = {
     Action.NOOP: ("=", None),
 }
 # Detail lines start with the same markers: + added, ~ changed, - removed, ± replaced, ! warning, = unchanged.
-_DETAIL: dict[str, tuple[str | None, bool, bool]] = {  # marker: (colour, bold, dim)
-    "+": (typer.colors.GREEN, False, False),
-    "~": (typer.colors.YELLOW, False, False),
-    "-": (typer.colors.RED, False, False),
-    "±": (typer.colors.RED, False, False),
-    "!": (typer.colors.YELLOW, True, False),
-    "=": (None, False, True),
+_DETAIL: dict[str, tuple[str | None, bool | None, bool | None]] = {  # marker: (colour, bold, dim)
+    "+": (typer.colors.GREEN, None, None),
+    "~": (typer.colors.YELLOW, None, None),
+    "-": (typer.colors.RED, None, None),
+    "±": (typer.colors.RED, None, None),
+    "!": (typer.colors.YELLOW, True, None),
+    "=": (None, None, True),
 }
 _CI = ("CI", "GITLAB_CI", "GITHUB_ACTIONS", "BUILDKITE", "TF_BUILD")
 
