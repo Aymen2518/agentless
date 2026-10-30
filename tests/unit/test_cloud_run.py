@@ -1085,10 +1085,11 @@ def test_a_dropped_tag_is_unbound_and_tags_bound_elsewhere_are_kept(make_run, gc
     service = next(c for c in changeset.changes if c.resource == "service")
     assert service.action == Action.UPDATE
     assert f"- tag {USERS_TAG}" in service.details
+    before = len(gcp.calls)
     deploy(make_run())
 
     assert set(gcp.run_service_tags(SERVICE)) == {INGRESS_TAG, "123/env/prod"}
-    assert "run_update" not in gcp.kinds()[gcp.kinds().index("run_untag") :]  # no new revision for a tag
+    assert "run_update" not in [c[0] for c in gcp.calls[before:]]  # no new revision for a tag
     assert actions(make_run())["service"] == Action.NOOP
 
 
@@ -1154,3 +1155,21 @@ def test_tags_are_validated(run_dir: Path, edit, tags: dict, message: str) -> No
     edit(lambda d: d.update(cloudRun={"tags": tags}))
     with pytest.raises(ConfigError, match=message):
         _load(run_dir)
+
+
+def test_a_new_tag_alone_makes_no_new_revision(make_run, gcp: FakeGcp, edit) -> None:
+    deploy(make_run())
+    edit(_tags(INGRESS_TAG))
+    before = len(gcp.calls)
+    deploy(make_run())
+    kinds = [c[0] for c in gcp.calls[before:]]
+    assert "run_tag" in kinds and "run_update" not in kinds
+
+
+def test_without_tags_the_tag_bindings_are_never_listed(make_run, gcp: FakeGcp) -> None:
+    def listed(_name: str) -> dict[str, str]:
+        raise AssertionError("tag bindings listed without cloudRun.tags")
+
+    gcp.run_service_tags = listed  # type: ignore[method-assign]
+    deploy(make_run())
+    assert actions(make_run())["service"] == Action.NOOP

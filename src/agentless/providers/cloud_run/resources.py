@@ -323,8 +323,10 @@ class ServiceResource(Resource):
 
         A wanted tag that was already bound outside agentless is left alone and never recorded as owned.
         """
-        live = ctx.clients.run_service_tags(name)
         wanted = self._tags(ctx)
+        if not wanted and not st.get("tags"):
+            return [], {}  # nothing to bind or unbind: no call (and no tag permission) needed
+        live = ctx.clients.run_service_tags(name)
         return [t for t in wanted if t not in live], {
             t: live[t] for t in st.get("tags", []) if t not in wanted and t in live
         }
@@ -400,7 +402,8 @@ class ServiceResource(Resource):
             desired = self._desired(ctx, planning=False)
             spec = engine_spec.redact(desired, ctx.project.sensitive)
             current = live is not None and bool(live.get("invokerIamDisabled")) == self._iam_disabled(ctx)
-            if current and st.get("spec") == spec and st.get("image") == image and not add and not remove:
+            unchanged = current and st.get("spec") == spec and st.get("image") == image
+            if unchanged and not add and not remove:
                 return  # a refresh with nothing new: no extra revision
             body = run_spec.api_service(desired, image)
             if live is None:
@@ -408,7 +411,8 @@ class ServiceResource(Resource):
                 ctx.reapply.add("access")  # a recreated service starts with an empty policy
             else:
                 self._bind(ctx, name, add)  # before the update: a tag may be what allows the new settings
-                ctx.clients.run_service_update(name, body)
+                if not unchanged:  # a tag change alone makes no new revision
+                    ctx.clients.run_service_update(name, body)
         for binding in remove.values():  # after the update: the old settings may have needed it
             ctx.clients.run_service_untag(binding)
         self._check_webhook_gate(ctx, name, url, body)
