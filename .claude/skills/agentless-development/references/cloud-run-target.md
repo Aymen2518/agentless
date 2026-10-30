@@ -42,7 +42,9 @@ User docs: README "Cloud Run target", `examples/cloud-run.yaml`.
      random wrong value) runs once per rollout: in `InvokerResource.apply` right after `allUsers` is granted, or in
      `ServiceResource._check_webhook_gate` for a new revision of a service that's already public. Unless both are
      401/403 it revokes `allUsers` and raises (also on any exception): fail closed, and the next deploy grants and
-     probes again. The schema rejects `access.invokers`, `publish` and `iap` with it. `invoke` uses
+     probes again. The probe treats Cloud Run IAM's own 403 (Google Frontend "does not have permission to get
+     URL", while the grant propagates) as no answer and retries (`_PROBE_ATTEMPTS`), else 0. Leaving webhook mode,
+     `ServiceResource.apply` revokes `allUsers` before the PATCH: the new revision has no gate. The schema rejects `access.invokers`, `publish` and `iap` with it. `invoke` uses
      `webhook_session` (secret header only, read via `sources.read_secret`, dropped on cross-host redirects).
      Fakes: `require_invoker_iam`, `all_users_tag`, and `webhook_probe` answering 403 until `allUsers` is granted.
 4. **v1 scope:** invokers, GE (A2A only), Agent Registry, Direct VPC egress, ingress, IAP.

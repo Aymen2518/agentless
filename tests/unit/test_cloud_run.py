@@ -896,10 +896,16 @@ def test_switching_from_webhook_back_to_iam_revokes_all_users(make_run, gcp: Fak
     assert any("- secret_env.AGENTLESS_WEBHOOK_SECRET" in d for d in service.details)
     access = next(c for c in changeset.changes if c.resource == "access")
     assert "- roles/run.invoker on the service → allUsers" in access.details
+    before = len(gcp.calls)
     deploy(make_run())
     assert not _all_users(gcp)
     assert not any(k.startswith("AGENTLESS_") for k in {**_env(gcp), **_secret_env(gcp)})
     assert gcp.kinds().count("webhook_probe") == 1
+    calls = gcp.calls[before:]
+    revoke = next(i for i, c in enumerate(calls) if c[0] == "iam" and c[1] == "runService")
+    assert calls[revoke][4] == [("roles/run.invoker", "allUsers")]
+    assert revoke < next(i for i, c in enumerate(calls) if c[0] == "run_update")  # closed before the gate goes
+    assert actions(make_run())["access"] == Action.NOOP
 
 
 def test_a_service_deployed_with_iam_off_gets_it_back_on(make_run, gcp: FakeGcp, edit) -> None:
@@ -1233,3 +1239,31 @@ def test_without_tags_the_tag_bindings_are_never_listed(make_run, gcp: FakeGcp) 
     gcp.run_service_tags = listed  # type: ignore[method-assign]
     deploy(make_run())
     assert actions(make_run())["service"] == Action.NOOP
+
+
+class _ProbeResponse:
+    def __init__(self, status: int, text: str = "") -> None:
+        self.status_code, self.text = status, text
+
+
+_IAM_403 = _ProbeResponse(403, "<h1>Error: Forbidden</h1> Your client does not have permission to get URL / ")
+
+
+@pytest.mark.parametrize(
+    ("answers", "statuses"),
+    [
+        ([_IAM_403, _IAM_403, _ProbeResponse(401), _ProbeResponse(403, '{"error": "unauthorized"}')], [401, 403]),
+        ([_IAM_403] * 50, [0, 0]),  # the grant never reached the container: proves nothing, fail closed
+    ],
+)
+def test_webhook_probe_waits_past_cloud_run_iam_refusals(
+    monkeypatch: pytest.MonkeyPatch, answers: list, statuses: list[int]
+) -> None:
+    import requests
+
+    from agentless.providers.cloud_run.clients import CloudRunClients
+
+    replies = iter(answers)
+    monkeypatch.setattr(requests, "get", lambda *_a, **_k: next(replies))
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    assert CloudRunClients.webhook_probe(object.__new__(CloudRunClients), URL, "x-gitlab-token") == statuses  # type: ignore[arg-type]

@@ -409,6 +409,10 @@ class ServiceResource(Resource):
                 ctx.reapply.add("access")  # a recreated service starts with an empty policy
             else:
                 self._bind(ctx, name, add)  # before the update: a tag may be what allows the new settings
+                if not run_spec.webhook_header(ctx.project) and _all_users_invoker(ctx, name):
+                    # Leaving auth: webhook: the new revision has no secret gate, so close the service first
+                    # (a foreign allUsers grant blocks the plan; this one is agentless's, `access` forgets it).
+                    ctx.clients.iam_modify("runService", name, [], [(run_spec.INVOKER_ROLE, run_spec.ALL_USERS)])
                 if not unchanged:  # a tag change alone makes no new revision
                     ctx.clients.run_service_update(name, body)
         for binding in remove.values():  # after the update: the old settings may have needed it

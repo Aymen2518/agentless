@@ -636,8 +636,10 @@ cloudRun:
   two values in constant time.
 - **agentless checks it after every rollout (fail closed).** It calls `GET /` with no credentials, once without the
   header and once with a wrong value. It probes right after granting `allUsers` on a new service, and after every
-  new revision of a public one (`--code-only` included). If either answer isn't 401 or 403, it revokes `allUsers` and
-  the deploy fails; the next deploy grants it again and probes. The service is reachable anonymously only from when
+  new revision of a public one (`--code-only` included). Cloud Run's own IAM refusal (while a fresh grant propagates)
+  doesn't count: the probe waits, up to about 6 minutes, for the container's answer. If either answer isn't 401 or
+  403, or the container never answers, it revokes `allUsers` and the deploy fails; the next deploy grants it again
+  and probes. Switching back to `auth: iam` revokes `allUsers` before the revision without the gate rolls out. The service is reachable anonymously only from when
   the revision serves until the check ends, a few seconds.
 - **Upgrading from 0.10 or 0.11,** where webhook mode turned the IAM check off: the next deploy turns it back on,
   then grants `allUsers`. GitLab gets 403 for the few seconds in between.

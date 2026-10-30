@@ -218,7 +218,9 @@ class CloudRunClients(GcpClients):
     def webhook_probe(self, url: str, header: str) -> list[int]:
         """Status codes of anonymous calls without the webhook secret and with a wrong one (auth: webhook).
 
-        No credentials are sent: this is what anyone on the internet gets. Retries while a new revision warms up.
+        No credentials are sent: this is what anyone on the internet gets. Retries while a new revision warms up and
+        while a fresh allUsers grant propagates: until then Cloud Run IAM answers 403 itself, which proves nothing
+        about the container. An answer that never comes from the container counts as 0 (not refused).
         """
         import secrets as _secrets
 
@@ -227,18 +229,27 @@ class CloudRunClients(GcpClients):
         audience(url)  # only ever probe a Cloud Run URL
         statuses = []
         for headers in ({}, {header: f"agentless-probe-{_secrets.token_hex(16)}"}):
-            for attempt in range(5):
+            for attempt in range(_PROBE_ATTEMPTS):
                 try:
                     response = requests.get(url, headers=headers, timeout=60, allow_redirects=False)
                 except requests.RequestException:  # timeouts too: anything but an answer counts as not refused
                     status = 0
                 else:
-                    status = response.status_code
+                    status = 0 if _iam_denied(response) else response.status_code
                 if status and status != 429 and status < 500:
                     break
-                time.sleep(2**attempt)
+                time.sleep(min(2**attempt, 15))
             statuses.append(status)
         return statuses
+
+
+_PROBE_ATTEMPTS = 25  # about 6 minutes of backoff: IAM changes usually propagate within a few
+# Cloud Run's own IAM refusal (Google Frontend page); a container's 403 never carries it.
+_IAM_DENIED = "does not have permission to get URL"
+
+
+def _iam_denied(response: Any) -> bool:
+    return response.status_code == 403 and _IAM_DENIED in (getattr(response, "text", "") or "")
 
 
 def webhook_session(url: str, header: str, token: str) -> Any:
