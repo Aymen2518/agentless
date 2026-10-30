@@ -41,6 +41,15 @@ User docs: README "Cloud Run target", `examples/cloud-run.yaml`.
      `webhook_session` (secret header only, read via `sources.read_secret`, dropped on cross-host redirects).
 4. **v1 scope:** invokers, GE (A2A only), Agent Registry, Direct VPC egress, ingress, IAP.
 
+5. **Tags (`cloudRun.tags`, 2026-10-30):** for org policies that check a tag on the service (`run.allowedIngress`
+   with `allowIngressAllForCloudRun`, as runway does). `ServiceResource._create` creates a tagged service closed
+   (ingress internal, `invokerIamDisabled: false`), binds the tags, then PATCHes the real body. On updates,
+   `_tag_diff` binds before the PATCH and unbinds after it. `state.service.tags` lists only the bindings agentless
+   made; a wanted tag already bound outside agentless is never recorded, so it's never removed. Calls go to the
+   regional Resource Manager v3 endpoint (`<region>-cloudresourcemanager.googleapis.com`), parent
+   `//run.googleapis.com/projects/<number>/locations/<region>/services/<id>`. `FakeGcp.ingress_all_tag` simulates
+   the org policy.
+
 ## Resource notes
 - **`ServiceResource`:**
   - Its spec (`cloud_run/spec.desired_spec`) is a flat dict like the engine spec, so `spec.diff`, `describe` and
@@ -97,6 +106,8 @@ User docs: README "Cloud Run target", `examples/cloud-run.yaml`.
 - An anonymous request to the service returns 403.
 
 ## Not verified against live APIs
+- `cloudRun.tags`: the regional tagBindings list/create/delete on a Cloud Run service and the LRO polling on the
+  regional endpoint.
 - `auth: googleToken`: that Cloud Run accepts `X-Serverless-Authorization` from user and impersonated tokens and
   forwards the custom `x-google-token` header unchanged (the docs don't list `X-Google-*` as reserved). Check it
   with a header-echo service before relying on it.

@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+- **Tags on Cloud Run services, `cloudRun.tags`.** For org policies that check a tag on the service itself, such as
+  `run.allowedIngress` allowing `ingress: all` only on tagged services. A new service is created closed (ingress
+  internal, invoker IAM check on), tagged, then given its settings, so it's never reachable before its tags are.
+  On an existing service, new tags are bound before the update and dropped ones unbound after it. Tags bound outside
+  agentless are never removed. The deployer needs `roles/resourcemanager.tagUser` on each tag value.
+
 ## [0.10.1] - 2026-10-29
 
 ### Changed

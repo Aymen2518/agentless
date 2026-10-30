@@ -31,6 +31,8 @@ cloudRun:
   # webhook:                               #   the shared secret in this header (verified after each rollout)
   #   header: x-gitlab-token
   #   secret: { secret: gitlab-webhook-token }
+  # tags:                                  # bound on the service before it opens (org policies such as
+  #   "123456789012/allowIngressAllForCloudRun": allow-ingress-all   #   run.allowedIngress check them)
   vpcEgress: { network: acme-vpc, subnetwork: agents-europe-west1, egress: private-ranges-only }
   timeout: 600s
   cpuThrottling: false

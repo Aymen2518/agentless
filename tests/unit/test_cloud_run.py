@@ -1016,3 +1016,141 @@ def test_invoke_in_webhook_mode_sends_the_secret_not_a_google_token(fake_cli: Pa
     assert secrets == ["gitlab-webhook-token"]
     assert sent["http"].headers["x-gitlab-token"] == "s3cret"
     assert "Authorization" not in sent["http"].headers
+
+
+# --- tags: bound on the service, before it opens -------------------------------------------------------------------
+
+INGRESS_TAG = "123/allowIngressAllForCloudRun/allow-ingress-all"
+USERS_TAG = "123/allUsersIngress/True"
+
+
+def _tags(*values: str) -> Callable[[dict], None]:
+    def change(data: dict) -> None:
+        data.setdefault("cloudRun", {})["tags"] = dict(v.rsplit("/", 1) for v in values)
+
+    return change
+
+
+def test_ingress_all_is_refused_without_its_tag(make_run, gcp: FakeGcp) -> None:
+    gcp.ingress_all_tag = INGRESS_TAG  # the org policy the fake simulates
+    with pytest.raises(RuntimeError, match="run.allowedIngress"):
+        deploy(make_run())
+
+
+def test_a_new_service_is_created_closed_tagged_then_opened(make_run, gcp: FakeGcp, edit) -> None:
+    gcp.ingress_all_tag = INGRESS_TAG
+    edit(_tags(INGRESS_TAG, USERS_TAG))
+    _, changeset = make_run().plan(DeployOptions())
+    service = next(c for c in changeset.changes if c.resource == "service")
+    assert f"+ tag {INGRESS_TAG} (bound before the service opens)" in service.details
+    deploy(make_run())
+
+    kinds = gcp.kinds()
+    assert kinds.index("run_create") < kinds.index("run_tag") < kinds.index("run_update")
+    created = next(c[2] for c in gcp.calls if c[0] == "run_create")
+    assert created["ingress"] == "INGRESS_TRAFFIC_INTERNAL_ONLY"
+    assert created["invokerIamDisabled"] is False
+    assert _service(gcp)["ingress"] == "INGRESS_TRAFFIC_ALL"
+    assert set(gcp.run_service_tags(SERVICE)) == {INGRESS_TAG, USERS_TAG}
+    assert actions(make_run())["service"] == Action.NOOP
+
+
+def test_without_tags_the_service_is_created_in_one_call(make_run, gcp: FakeGcp) -> None:
+    deploy(make_run())
+    assert "run_tag" not in gcp.kinds()
+    assert "run_update" not in gcp.kinds()
+
+
+def test_a_tag_is_bound_before_the_update_that_needs_it(make_run, gcp: FakeGcp, edit) -> None:
+    edit(lambda d: d.update(cloudRun={"ingress": "internal"}))
+    deploy(make_run())
+    gcp.ingress_all_tag = INGRESS_TAG
+    edit(lambda d: d.update(cloudRun={"ingress": "all", "tags": {INGRESS_TAG.rsplit("/", 1)[0]: "allow-ingress-all"}}))
+    _, changeset = make_run().plan(DeployOptions())
+    service = next(c for c in changeset.changes if c.resource == "service")
+    assert f"+ tag {INGRESS_TAG}" in service.details
+    deploy(make_run())
+
+    kinds = gcp.kinds()
+    assert kinds.index("run_tag") < len(kinds) - 1 - kinds[::-1].index("run_update")
+    assert _service(gcp)["ingress"] == "INGRESS_TRAFFIC_ALL"
+
+
+def test_a_dropped_tag_is_unbound_and_tags_bound_elsewhere_are_kept(make_run, gcp: FakeGcp, edit) -> None:
+    edit(_tags(INGRESS_TAG, USERS_TAG))
+    deploy(make_run())
+    gcp.run_service_tag(SERVICE, "123/env/prod")  # bound outside agentless
+    edit(_tags(INGRESS_TAG))
+    _, changeset = make_run().plan(DeployOptions())
+    service = next(c for c in changeset.changes if c.resource == "service")
+    assert service.action == Action.UPDATE
+    assert f"- tag {USERS_TAG}" in service.details
+    deploy(make_run())
+
+    assert set(gcp.run_service_tags(SERVICE)) == {INGRESS_TAG, "123/env/prod"}
+    assert "run_update" not in gcp.kinds()[gcp.kinds().index("run_untag") :]  # no new revision for a tag
+    assert actions(make_run())["service"] == Action.NOOP
+
+
+def test_a_wanted_tag_already_bound_outside_agentless_is_never_removed(make_run, gcp: FakeGcp, edit) -> None:
+    deploy(make_run())
+    gcp.run_service_tag(SERVICE, INGRESS_TAG)
+    edit(_tags(INGRESS_TAG))
+    assert actions(make_run())["service"] == Action.NOOP
+    edit(lambda d: d["cloudRun"].pop("tags"))
+    assert actions(make_run())["service"] == Action.NOOP  # not agentless's: not unbound
+    deploy(make_run())
+    assert INGRESS_TAG in gcp.run_service_tags(SERVICE)
+
+
+def test_a_failed_tag_binding_leaves_the_service_closed_and_the_rerun_finishes(make_run, gcp: FakeGcp, edit) -> None:
+    gcp.ingress_all_tag = INGRESS_TAG
+    edit(_tags(INGRESS_TAG))
+    real = gcp.run_service_tag
+
+    def denied(_name: str, _value: str) -> None:
+        raise RuntimeError("403 resourcemanager.tagValueBindings.create denied")
+
+    gcp.run_service_tag = denied  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="403"):
+        deploy(make_run())
+    assert _service(gcp)["ingress"] == "INGRESS_TRAFFIC_INTERNAL_ONLY"  # never opened
+
+    gcp.run_service_tag = real  # type: ignore[method-assign]
+    deploy(make_run())
+    assert _service(gcp)["ingress"] == "INGRESS_TRAFFIC_ALL"
+    assert INGRESS_TAG in gcp.run_service_tags(SERVICE)
+
+
+def test_a_recreated_service_gets_its_tags_back(make_run, gcp: FakeGcp, edit) -> None:
+    gcp.ingress_all_tag = INGRESS_TAG
+    edit(_tags(INGRESS_TAG))
+    deploy(make_run())
+    gcp.run_service_delete(SERVICE)
+    deploy(make_run())
+    assert INGRESS_TAG in gcp.run_service_tags(SERVICE)
+    assert _service(gcp)["ingress"] == "INGRESS_TRAFFIC_ALL"
+
+
+def test_webhook_with_tags_opens_after_tagging_and_probes(make_run, gcp: FakeGcp, edit) -> None:
+    gcp.ingress_all_tag = INGRESS_TAG
+    edit(lambda d: (_webhook(d), _tags(INGRESS_TAG)(d)))
+    deploy(make_run())
+    created = next(c[2] for c in gcp.calls if c[0] == "run_create")
+    assert created["invokerIamDisabled"] is False  # closed until tagged
+    assert _service(gcp)["invokerIamDisabled"] is True
+    assert gcp.kinds().index("run_tag") < gcp.kinds().index("webhook_probe")
+
+
+@pytest.mark.parametrize(
+    ("tags", "message"),
+    [
+        ({"allowIngressAllForCloudRun": "allow-ingress-all"}, "must be <org or project id>/<key short name>"),
+        ({"123/a/b": "x"}, "must be <org or project id>/<key short name>"),
+        ({"123/allowIngressAllForCloudRun": "a/b"}, "must be a short name"),
+    ],
+)
+def test_tags_are_validated(run_dir: Path, edit, tags: dict, message: str) -> None:
+    edit(lambda d: d.update(cloudRun={"tags": tags}))
+    with pytest.raises(ConfigError, match=message):
+        _load(run_dir)

@@ -58,6 +58,43 @@ class CloudRunClients(GcpClients):
             raise RuntimeError(f"operation {operation['name']} failed: {operation['error']}")
         return operation.get("response") or {}
 
+    # --- tags on services ------------------------------------------------------------------------------------------
+
+    def _tag_api(self) -> str:
+        return f"https://{self.region}-cloudresourcemanager.googleapis.com/v3"  # regional resources: regional endpoint
+
+    def _tag_parent(self, name: str) -> str:
+        return f"//run.googleapis.com/projects/{self.project_number()}/{name.split('/', 2)[2]}"
+
+    def run_service_tags(self, name: str) -> dict[str, str]:
+        """Tags bound directly on the service: namespaced value (`<parent>/<key>/<value>`) -> tag binding name."""
+        bindings: dict[str, str] = {}
+        params = {"parent": self._tag_parent(name), "pageSize": 300}
+        while True:
+            page = self._rest("GET", f"{self._tag_api()}/tagBindings", params=params)
+            for b in page.get("tagBindings", []):
+                bindings[b["tagValueNamespacedName"]] = b["name"]
+            if not page.get("nextPageToken"):
+                return bindings
+            params["pageToken"] = page["nextPageToken"]
+
+    def run_service_tag(self, name: str, value: str) -> None:
+        """Bind a namespaced tag value on the service and wait for it."""
+        body = {"parent": self._tag_parent(name), "tagValueNamespacedName": value}
+        operation = self._rest("POST", f"{self._tag_api()}/tagBindings", json=body)
+        start = time.monotonic()
+        while not operation.get("done"):
+            if time.monotonic() - start > 300:
+                raise RuntimeError(f"binding tag {value} on {name}: operation still running after 300s")
+            time.sleep(2)
+            operation = self._rest("GET", f"{self._tag_api()}/{operation['name']}")
+        if operation.get("error"):
+            raise RuntimeError(f"binding tag {value} on {name} failed: {operation['error']}")
+
+    def run_service_untag(self, binding: str) -> None:
+        """Delete a tag binding (its name as listed by run_service_tags); a missing one is a no-op."""
+        self._rest("DELETE", f"{self._tag_api()}/{binding}")
+
     # --- IAM on services -------------------------------------------------------------------------------------------
 
     def iam_members(self, rtype: str, name: str) -> dict[str, set[str]] | None:  # noqa: D102

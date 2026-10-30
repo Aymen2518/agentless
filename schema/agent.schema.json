@@ -486,6 +486,14 @@
           "minimum": 1,
           "title": "Port",
           "type": "integer"
+        },
+        "tags": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Resource Manager tags bound on the service, `<org or project id>/<key short name>: <value short name>`, for org policies that check a tag on the service (e.g. `run.allowedIngress`). A new service is created closed (ingress internal, IAM check on), tagged, then given its settings.",
+          "title": "Tags",
+          "type": "object"
         }
       },
       "title": "CloudRun",

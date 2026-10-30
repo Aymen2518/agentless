@@ -241,7 +241,7 @@ identity:
 | `resources.buckets` | GCS buckets agentless creates, with access for the agent and the name in an env var | Cloud Storage buckets, bucket IAM |
 | `evaluation` | dataset, metrics and thresholds for `agentless eval` and the deploy gate; online monitors on live traffic | Evaluation Service `evaluationRuns` / `onlineEvaluators` |
 | `observability.tracing` | Cloud Trace export (on by default), prompt/response capture (off by default), runtime roles granted automatically | env vars, same as agents-cli; project IAM |
-| `cloudRun` | only with `provider.name: cloud-run`: prebuilt image or Artifact Registry repository, ingress, IAP, Direct VPC egress, timeout, CPU throttling, session affinity, port | Cloud Run service (see [Cloud Run target](#cloud-run-target)) |
+| `cloudRun` | only with `provider.name: cloud-run`: prebuilt image or Artifact Registry repository, ingress, IAP, Direct VPC egress, timeout, CPU throttling, session affinity, port, tags | Cloud Run service (see [Cloud Run target](#cloud-run-target)) |
 
 ### Buckets
 
@@ -500,7 +500,7 @@ access:
 | 1 | `serviceAccount`, `buckets`, `iam` | same as on Agent Runtime; the runtime identity is always a service account |
 | 2 | `sessionEngine` | a bare reasoning engine (no code) holding sessions and the Memory Bank, when `memory.sessions` is `agentPlatform` (the default) or `memory.memoryBank` is set. The service gets `GOOGLE_CLOUD_AGENT_ENGINE_ID`, and the runtime SA `roles/aiplatform.user` on that engine only (declare model access, e.g. `roles/aiplatform.user` on the project, in `identity.roles` as on Agent Runtime). Use `sessions: inMemory` to skip it |
 | 3 | `build` | the image: the packaged source is uploaded to the staging bucket, built by Cloud Build and pushed to `<region>-docker.pkg.dev/<project>/<cloudRun.artifactRegistry>/<service>:<hash>`. The tag hashes the source and build args, so an image already in the registry is never rebuilt. Skipped when `cloudRun.image` is set (built in CI) |
-| 4 | `service` | the Cloud Run service, `<service>-<stage>` unless `cloudRun.serviceName`. Its config is diffed against the last-applied spec. Each change is a new revision, and the image is pinned by digest. `APP_URL` is the service's `run.app` URL, which is known before creation |
+| 4 | `service` | the Cloud Run service, `<service>-<stage>` unless `cloudRun.serviceName`. Its config is diffed against the last-applied spec. Each change is a new revision, and the image is pinned by digest. `APP_URL` is the service's `run.app` URL, which is known before creation. `cloudRun.tags` are bound on the service (see [Tags](#cloud-run-tags)) |
 | 5 | `access` | `roles/run.invoker` on the service for `access.invokers` and the Gemini Enterprise service agent |
 | 6 | `agentRegistry`, `geminiEnterprise` | the agent card served by the service (Gemini Enterprise registration is `a2a` on Cloud Run) |
 
@@ -661,6 +661,26 @@ class WebhookGate:
 
 app.add_middleware(WebhookGate)
 ```
+
+<a id="cloud-run-tags"></a>
+**Tags (`cloudRun.tags`).** Some org policies check a Resource Manager tag on the service itself, for example
+`run.allowedIngress` allowing `ingress: all` only on tagged services, or a Domain Restricted Sharing exception.
+
+```yaml
+cloudRun:
+  ingress: all
+  tags:
+    "123456789012/allowIngressAllForCloudRun": allow-ingress-all   # <org or project id>/<key>: <value>
+```
+
+- **A new service is created closed:** ingress `internal` and the invoker IAM check on, then tagged, then given its
+  real settings. A service can only be tagged once it exists, and it is never reachable before its tags are. If
+  tagging fails, the service stays closed and the next deploy finishes the job.
+- **On an existing service** new tags are bound before the update (a tag may be what allows it), and dropped ones
+  are unbound after it. A tag change alone makes no new revision.
+- **Only agentless's bindings are removed.** A tag bound outside agentless stays, even when it's also listed.
+- **Permissions:** the deployer needs `roles/resourcemanager.tagUser` on each tag value, and the right to bind tags
+  on the service (`run.services.createTagBinding`, in `roles/run.admin`).
 
 **Not supported on Cloud Run yet:** `eval`, `evaluation.afterDeploy`, `evaluation.monitors`, `deploy --no-wait` /
 `--status`, PSC-I (use `cloudRun.vpcEgress`), `agent.runtime.serverMode`, and `identity.type` other than
