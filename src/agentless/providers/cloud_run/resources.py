@@ -5,6 +5,7 @@ The runtime service account, buckets, IAM and publishing are the Agent Runtime r
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import tempfile
@@ -25,6 +26,7 @@ from agentless.providers.agent_runtime.resources import (
     is_a2a,
     service_account_email,
 )
+from agentless.providers.cloud_run import routing
 from agentless.providers.cloud_run import spec as run_spec
 
 _PUBLIC = ("allUsers", "allAuthenticatedUsers")
@@ -504,6 +506,284 @@ def _probe_webhook(ctx: Context, name: str, url: str) -> None:
     )
 
 
+class LoadBalancerResource(Resource):
+    """Serverless NEG and backend service of the agent, routed from an existing (shared) load balancer's URL map.
+
+    The NEG and the backend service belong to the agent. In the URL map, agentless only adds and removes its own
+    entries (see `routing`), with fingerprint retries, so other agents and the load balancer's IaC are never touched.
+    """
+
+    key = "loadBalancer"
+
+    @staticmethod
+    def _target(ctx: Context) -> dict[str, Any] | None:
+        """Desired NEG, backend service and route; `scheme` is None until read from the URL map."""
+        cfg = ctx.project.config
+        lb = cfg.cloud_run.load_balancer if cfg.cloud_run else None
+        if lb is None:
+            return None
+        project, region, svc = cfg.provider.project, cfg.provider.region, cfg.run_service_name
+        scope = f"regions/{region}" if lb.regional else "global"
+        return {
+            "neg": f"projects/{project}/regions/{region}/networkEndpointGroups/{svc}-neg",
+            "service": svc,
+            "backendService": f"projects/{project}/{scope}/backendServices/{svc}-lb",
+            "scheme": lb.load_balancing_scheme,
+            "urlMap": f"projects/{project}/{scope}/urlMaps/{lb.url_map}",
+            "hosts": list(lb.hosts),
+            "pathPrefix": lb.path_prefix,
+            "matcher": f"{routing.MATCHER_PREFIX}{svc}",
+        }
+
+    @staticmethod
+    def _marker(ctx: Context) -> str:
+        cfg = ctx.project.config
+        return f"agentless {cfg.service}/{cfg.provider.stage}"
+
+    def _route(self, ctx: Context, target: dict[str, Any]) -> routing.Route:
+        return routing.Route(
+            hosts=tuple(target["hosts"]),
+            path_prefix=target["pathPrefix"],
+            matcher=target["matcher"],
+            backend=target["backendService"],
+            description=self._marker(ctx),
+        )
+
+    def _resolve(self, ctx: Context, target: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+        """The live URL map and the target with its scheme filled in, or why it can't be."""
+        name = target["urlMap"].rsplit("/", 1)[-1]
+        url_map = ctx.clients.compute_get(target["urlMap"])
+        if url_map is None:
+            return None, (
+                f"URL map {target['urlMap']} not found: create the load balancer first (it belongs to your "
+                "environment's IaC) or fix cloudRun.loadBalancer.urlMap / regional"
+            )
+        default = url_map.get("defaultService") or ""
+        map_scheme = None
+        if "/backendServices/" in default:
+            map_scheme = (ctx.clients.compute_get(routing.path(default)) or {}).get("loadBalancingScheme")
+        if target["scheme"] and map_scheme and target["scheme"] != map_scheme:
+            return None, (
+                f"loadBalancingScheme {target['scheme']} doesn't match URL map {name}'s ({map_scheme}): a URL map "
+                "can't mix schemes; drop cloudRun.loadBalancer.loadBalancingScheme"
+            )
+        target["scheme"] = target["scheme"] or map_scheme
+        if target["scheme"] is None:
+            return None, (
+                f"can't tell the load balancing scheme of URL map {name} (its default is not a backend service): "
+                "set cloudRun.loadBalancer.loadBalancingScheme"
+            )
+        return url_map, None
+
+    @staticmethod
+    def _owned_route(matcher: str, backend: str) -> routing.Route:
+        """The entries of a matcher and backend service, to strip them (hosts and paths don't matter)."""
+        return routing.Route(hosts=(), path_prefix=None, matcher=matcher, backend=backend, description="")
+
+    def _survey(
+        self, ctx: Context, st: dict[str, Any], target: dict[str, Any], url_map: dict[str, Any]
+    ) -> dict[str, Any]:
+        """What a run has to do, read from live resources and state; plan and apply both act on it.
+
+        - foreign: a NEG or backend service with the agent's name that agentless didn't create (blocks);
+        - deleteBackends / deleteNegs: recorded or live ones that no longer match (renamed, other scheme, other
+          service): deleted, then created again;
+        - detach: (URL map, owned entries) to strip before that, e.g. under the old names or from the old map;
+        - problems: conflicts of the new route with the map, once the agent's old entries are left out.
+        """
+        marker = self._marker(ctx)
+        live = {key: ctx.clients.compute_get(target[key]) for key in ("neg", "backendService")}
+        foreign = [
+            f"{target[key]} exists and is not managed by agentless for {marker.split()[1]}"
+            for key, resource in live.items()
+            if resource is not None and resource.get("description") != marker
+        ]
+        neg, backend = live["neg"], live["backendService"]
+        bad_neg = neg is not None and (neg.get("cloudRun") or {}).get("service") != target["service"]
+        bad_backend = backend is not None and (
+            bad_neg
+            or backend.get("loadBalancingScheme") != target["scheme"]
+            or [routing.path(b.get("group", "")) for b in backend.get("backends", [])] != [target["neg"]]
+        )
+        delete_backends = [p for p in [st.get("backendService")] if p and p != target["backendService"]]
+        delete_negs = [p for p in [st.get("neg")] if p and p != target["neg"]]
+        if bad_backend and not foreign:
+            delete_backends.append(target["backendService"])
+        if bad_neg and not foreign:
+            delete_negs.append(target["neg"])
+        detach: list[tuple[str, routing.Route]] = []
+        old = (st.get("matcher"), st.get("backendService"))
+        new = (target["matcher"], target["backendService"])
+        if st.get("urlMap") and old[0] and old[1] and (st["urlMap"] != target["urlMap"] or old != new):
+            detach.append((st["urlMap"], self._owned_route(old[0], old[1])))
+        if target["backendService"] in delete_backends:  # recreated under the same name: unroute it first
+            detach.append((target["urlMap"], self._owned_route(*new)))
+        probe = copy.deepcopy(url_map)
+        for map_path, route in detach:
+            if map_path == target["urlMap"]:
+                routing.strip(probe, route)
+        if old[0] and old[1]:
+            routing.strip(probe, self._owned_route(old[0], old[1]))
+        problems = routing.conflicts(probe, self._route(ctx, target))
+        return {
+            "foreign": foreign,
+            "live": live,
+            "deleteBackends": delete_backends,
+            "deleteNegs": delete_negs,
+            "detach": detach,
+            "problems": problems,
+        }
+
+    @staticmethod
+    def _notes(ctx: Context, target: dict[str, Any]) -> list[str]:
+        run = ctx.project.config.cloud_run
+        assert run is not None
+        notes = [
+            (
+                "= callers through the load balancer still need roles/run.invoker and a Google ID token "
+                f"(audience {ServiceResource._url(ctx)})"
+            )
+        ]
+        if run.ingress == "all":
+            notes.append(
+                "! ingress all: the service also answers on its run.app URL; set ingress "
+                "internal-and-cloud-load-balancing to serve it only through the load balancer"
+            )
+        elif run.ingress == "internal" and target["scheme"] != "INTERNAL_MANAGED":
+            notes.append(
+                "! ingress internal refuses traffic from an external load balancer; use "
+                "internal-and-cloud-load-balancing"
+            )
+        return notes
+
+    def plan(self, ctx: Context) -> Change:  # noqa: D102
+        st = self._state(ctx)
+        target = self._target(ctx)
+        if target is None:
+            if st:
+                return Change(self.key, Action.DELETE, st.get("backendService", "load balancer"), self._gone(st))
+            return Change(self.key, Action.NOOP, "not behind a load balancer")
+        url_map, problem = self._resolve(ctx, target)
+        summary = target["backendService"].rsplit("/", 1)[-1]
+        action = Action.UPDATE if st else Action.CREATE
+        if url_map is None:
+            return Change(self.key, action, summary, blocked=problem)
+        todo = self._survey(ctx, st, target, url_map)
+        if todo["foreign"] or todo["problems"]:
+            return Change(self.key, action, summary, blocked="; ".join(todo["foreign"] + todo["problems"]))
+        details = [f"- routes from URL map {m.rsplit('/', 1)[-1]} ({r.matcher})" for m, r in todo["detach"]]
+        details += [f"- backend service {p.rsplit('/', 1)[-1]} (recreated)" for p in todo["deleteBackends"]]
+        details += [f"- serverless NEG {p.rsplit('/', 1)[-1]} (recreated)" for p in todo["deleteNegs"]]
+        if todo["live"]["neg"] is None or target["neg"] in todo["deleteNegs"]:
+            details.append(
+                f"+ serverless NEG {target['neg'].rsplit('/', 1)[-1]} → Cloud Run service {target['service']}"
+            )
+        if todo["live"]["backendService"] is None or target["backendService"] in todo["deleteBackends"]:
+            details.append(f"+ backend service {summary} ({target['scheme']})")
+        route = self._route(ctx, target)
+        if details or st.get("urlMap") != target["urlMap"] or not routing.in_place(url_map, route):
+            details.append(routing.describe(route, target["urlMap"].rsplit("/", 1)[-1]))
+        if not details and st and not st.get("spec"):
+            details.append("~ finish an interrupted deploy")
+        if not details:
+            return Change(self.key, Action.NOOP, summary)
+        return Change(self.key, action, summary, details + self._notes(ctx, target))
+
+    def apply(self, ctx: Context, change: Change) -> None:  # noqa: D102
+        target = self._target(ctx)
+        if target is None:
+            self.destroy(ctx)
+            return
+        url_map, problem = self._resolve(ctx, target)
+        if url_map is None:
+            raise RuntimeError(problem)
+        st = dict(self._state(ctx))
+        todo = self._survey(ctx, st, target, url_map)
+        if todo["foreign"] or todo["problems"]:  # checked on a fresh read, before anything is unrouted
+            raise RuntimeError("; ".join(todo["foreign"] + todo["problems"]))
+        for map_path, route in todo["detach"]:
+            if ctx.clients.compute_get(map_path) is not None and ctx.clients.url_map_edit(
+                map_path, lambda m, r=route: routing.strip(m, r)
+            ):
+                ctx.echo(f"    removed {route.matcher} routes from {map_path}")
+        if st.get("urlMap") and st["urlMap"] != target["urlMap"]:
+            st.pop("urlMap")
+            self._set_state(ctx, st)
+        for key, paths in (("backendService", todo["deleteBackends"]), ("neg", todo["deleteNegs"])):
+            for resource in paths:  # backend services first: they hold the NEG
+                ctx.clients.compute_delete(resource)
+                ctx.echo(f"    deleted {resource}")
+                if st.get(key) == resource:
+                    st.pop(key)
+                    if key == "backendService":
+                        st.pop("scheme", None)
+                    self._set_state(ctx, st)
+        marker = self._marker(ctx)
+        st["matcher"] = target["matcher"]
+        for key, body in (
+            ("neg", {"networkEndpointType": "SERVERLESS", "cloudRun": {"service": target["service"]}}),
+            (
+                "backendService",
+                {"loadBalancingScheme": target["scheme"], "backends": [{"group": routing.link(target["neg"])}]},
+            ),
+        ):
+            if ctx.clients.compute_get(target[key]) is None:
+                collection, _, name = target[key].rpartition("/")
+                ctx.clients.compute_insert(collection, {"name": name, "description": marker, **body})
+                ctx.echo(f"    created {target[key]}")
+            st[key] = target[key]
+            if key == "backendService":
+                st["scheme"] = target["scheme"]
+            self._set_state(ctx, st)
+        # Recorded before the edit: a crash in between leaves entries that the next run or `remove` strips.
+        st["urlMap"] = target["urlMap"]
+        self._set_state(ctx, st)
+        route = self._route(ctx, target)
+        if ctx.clients.url_map_edit(target["urlMap"], lambda m: routing.reconcile(m, route)):
+            ctx.echo(f"    {routing.describe(route, target['urlMap'].rsplit('/', 1)[-1])[2:]}")
+        self._set_state(ctx, {**st, "spec": target})
+
+    @staticmethod
+    def _gone(st: dict[str, Any]) -> list[str]:
+        lines = []
+        if st.get("urlMap"):
+            lines.append(f"- routes from URL map {st['urlMap'].rsplit('/', 1)[-1]} (only the agent's own)")
+        if st.get("backendService"):
+            lines.append(f"- backend service {st['backendService'].rsplit('/', 1)[-1]}")
+        if st.get("neg"):
+            lines.append(f"- serverless NEG {st['neg'].rsplit('/', 1)[-1]}")
+        return lines
+
+    def _detach(self, ctx: Context, st: dict[str, Any]) -> None:
+        """Strip the agent's entries from the URL map named in state (a URL map deleted since is fine)."""
+        url_map = st.get("urlMap")
+        if not url_map or ctx.clients.compute_get(url_map) is None:
+            return
+        route = self._owned_route(st.get("matcher", ""), st.get("backendService", ""))
+        if ctx.clients.url_map_edit(url_map, lambda m: routing.strip(m, route)):
+            ctx.echo(f"    removed routes from {url_map}")
+
+    def plan_destroy(self, ctx: Context) -> Change:  # noqa: D102
+        st = self._state(ctx)
+        if not st:
+            return Change(self.key, Action.NOOP, "not behind a load balancer")
+        return Change(self.key, Action.DELETE, st.get("backendService", "load balancer"), self._gone(st))
+
+    def destroy(self, ctx: Context) -> None:  # noqa: D102
+        st = dict(self._state(ctx))
+        if not st:
+            return
+        self._detach(ctx, st)  # first: a backend service still routed can't be deleted
+        st.pop("urlMap", None)
+        self._set_state(ctx, st)
+        for key in ("backendService", "neg"):  # the backend service holds the NEG
+            if st.get(key):
+                ctx.clients.compute_delete(st[key])
+                st.pop(key)
+                self._set_state(ctx, st)
+        self._set_state(ctx, None)
+
+
 class InvokerResource(AccessResource):
     """Who may call the service: roles/run.invoker bindings on it. Public members are never granted or tolerated.
 
@@ -569,6 +849,7 @@ ALL_RESOURCES: tuple[type[Resource], ...] = (
     SessionEngineResource,
     BuildResource,
     ServiceResource,
+    LoadBalancerResource,
     InvokerResource,
     AgentRegistryResource,
     GeminiEnterpriseResource,

@@ -462,6 +462,18 @@
           ],
           "default": null
         },
+        "loadBalancer": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LoadBalancer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Serve the service behind an existing load balancer: agentless creates a serverless NEG and a backend service, and routes the hosts (or hosts + pathPrefix) to it in the URL map. Callers still need roles/run.invoker; use ingress internal-and-cloud-load-balancing to only serve through the load balancer."
+        },
         "timeout": {
           "default": "300s",
           "description": "Request timeout, at most 3600s.",
@@ -882,6 +894,71 @@
       ],
       "title": "IdentityType",
       "type": "string"
+    },
+    "LoadBalancer": {
+      "additionalProperties": false,
+      "description": "Existing Application Load Balancer that serves the service, through a serverless NEG and a backend service.\n\nThe load balancer is shared: agentless adds only its own entries to the URL map and removes only those.",
+      "properties": {
+        "urlMap": {
+          "description": "Name of the load balancer's URL map, in provider.project.",
+          "pattern": "^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$",
+          "title": "Urlmap",
+          "type": "string"
+        },
+        "regional": {
+          "default": false,
+          "description": "The URL map is regional, in provider.region (regional external or internal load balancer); global otherwise.",
+          "title": "Regional",
+          "type": "boolean"
+        },
+        "hosts": {
+          "description": "Hostnames routed to the agent.",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Hosts",
+          "type": "array"
+        },
+        "pathPrefix": {
+          "anyOf": [
+            {
+              "pattern": "^(/[A-Za-z0-9._~-]+)+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Share the hosts with other services: only <prefix> and <prefix>/* go to the agent, with the prefix stripped. The hosts must already be routed by a host rule of the URL map that your IaC owns. Without it, the agent gets its own host rule and path matcher for the hosts.",
+          "title": "Pathprefix"
+        },
+        "loadBalancingScheme": {
+          "anyOf": [
+            {
+              "enum": [
+                "EXTERNAL_MANAGED",
+                "EXTERNAL",
+                "INTERNAL_MANAGED"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Scheme of the agent's backend service. Defaults to the scheme of the URL map's default backend service.",
+          "title": "Loadbalancingscheme"
+        }
+      },
+      "required": [
+        "urlMap",
+        "hosts"
+      ],
+      "title": "LoadBalancer",
+      "type": "object"
     },
     "Memory": {
       "additionalProperties": false,

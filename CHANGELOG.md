@@ -6,6 +6,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-06
+
+### Added
+- **Cloud Run agents behind an existing, shared load balancer, `cloudRun.loadBalancer`.** agentless creates a
+  serverless NEG and a backend service for the agent and routes `hosts` (its own host rule and path matcher) or
+  `hosts` + `pathPrefix` (path rules, prefix stripped, in a path matcher your IaC owns) to it in the URL map. Only
+  the agent's own entries are ever added or removed, with fingerprint retries, so several agents can share one
+  load balancer and removing one leaves the others serving. Conflicts with existing routes block the plan.
+  The deployer needs `roles/compute.loadBalancerAdmin`. Verified live on a global external Application Load
+  Balancer; classic and regional load balancers aren't verified yet.
+
 ## [0.12.0] - 2026-10-30
 
 ### Changed
@@ -252,7 +263,8 @@ First public release: wheel and sdist (`agentless-cli`) on the GitHub Release, a
 - Plugins through pluggy entry points in the `agentless` group.
 - Multi-arch container image and Claude Code skills for developing agentless and deploying agents with it.
 
-[Unreleased]: https://github.com/Aymen2518/agentless/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/Aymen2518/agentless/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/Aymen2518/agentless/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/Aymen2518/agentless/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/Aymen2518/agentless/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/Aymen2518/agentless/compare/v0.10.0...v0.10.1

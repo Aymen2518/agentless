@@ -1267,3 +1267,406 @@ def test_webhook_probe_waits_past_cloud_run_iam_refusals(
     monkeypatch.setattr(requests, "get", lambda *_a, **_k: next(replies))
     monkeypatch.setattr("time.sleep", lambda _s: None)
     assert CloudRunClients.webhook_probe(object.__new__(CloudRunClients), URL, "x-gitlab-token") == statuses  # type: ignore[arg-type]
+
+
+# --- load balancer: a shared URL map, only the agent's own entries ----------------------------------------------
+
+LB_MAP = "projects/proj-dev/global/urlMaps/shared-lb"
+LB_BS = "projects/proj-dev/global/backendServices/sample-agent-dev-lb"
+LB_NEG = "projects/proj-dev/regions/europe-west1/networkEndpointGroups/sample-agent-dev-neg"
+LB_DEFAULT = "https://www.googleapis.com/compute/v1/projects/proj-dev/global/backendServices/shared-lb-default"
+# What the load balancer's IaC owns: two hosts, one of them with a path rule.
+LB_FOREIGN = {
+    "hostRules": [
+        {"hosts": ["www.example.com"], "pathMatcher": "web"},
+        {"hosts": ["api.example.com"], "pathMatcher": "api"},
+    ],
+    "pathMatchers": [
+        {"name": "web", "defaultService": LB_DEFAULT},
+        {"name": "api", "defaultService": LB_DEFAULT, "pathRules": [{"paths": ["/v1/*"], "service": LB_DEFAULT}]},
+    ],
+}
+
+
+def _behind_lb(**lb: object) -> Callable[[dict], None]:
+    def apply(data: dict) -> None:
+        run = data.setdefault("cloudRun", {})
+        run["ingress"] = "internal-and-cloud-load-balancing"
+        run["loadBalancer"] = {"urlMap": "shared-lb", **lb}
+
+    return apply
+
+
+@pytest.fixture
+def lb(gcp: FakeGcp) -> str:
+    return gcp.add_url_map("shared-lb", **json.loads(json.dumps(LB_FOREIGN)))
+
+
+def _url_map(gcp: FakeGcp) -> dict:
+    return gcp.compute[LB_MAP]
+
+
+def _foreign_untouched(gcp: FakeGcp) -> None:
+    url_map = _url_map(gcp)
+    for rule in LB_FOREIGN["hostRules"]:
+        assert rule in url_map["hostRules"]
+    web = next(m for m in url_map["pathMatchers"] if m["name"] == "web")
+    assert web == LB_FOREIGN["pathMatchers"][0]
+    api = next(m for m in url_map["pathMatchers"] if m["name"] == "api")
+    assert {"paths": ["/v1/*"], "service": LB_DEFAULT} in api["pathRules"]
+
+
+@pytest.fixture
+def other_agent(run_dir: Path, tmp_path: Path, gcp: FakeGcp) -> Callable[..., CloudRunProvider]:
+    """A second agent (its own state) deployed against the same project and load balancer."""
+    import shutil
+
+    import yaml
+
+    def make(service: str, **lb: object) -> CloudRunProvider:
+        dest = tmp_path / service
+        if not dest.exists():
+            shutil.copytree(run_dir, dest, ignore=shutil.ignore_patterns(".agentless"))
+        data = yaml.safe_load((dest / "agent.yaml").read_text())
+        data["service"] = service
+        data["identity"]["serviceAccount"]["name"] = f"{service}-sa"[:30]
+        _behind_lb(**lb)(data)
+        (dest / "agent.yaml").write_text(yaml.safe_dump(data, sort_keys=False))
+        project = load_project(dest / "agent.yaml")
+        store = LocalStateStore(dest, project.stage)
+        return CloudRunProvider(project, hooks=plugin_manager(), clients=gcp, store=store, echo=lambda _: None)
+
+    return make
+
+
+def test_load_balancer_host_mode_adds_its_own_neg_backend_and_routes(make_run, gcp: FakeGcp, edit, lb) -> None:
+    edit(_behind_lb(hosts=["agent.example.com"]))
+    deploy(make_run())
+
+    assert gcp.kinds().index("run_create") < gcp.kinds().index("compute_insert")
+    assert gcp.compute[LB_NEG]["cloudRun"] == {"service": "sample-agent-dev"}
+    assert gcp.compute[LB_NEG]["networkEndpointType"] == "SERVERLESS"
+    backend = gcp.compute[LB_BS]
+    assert backend["loadBalancingScheme"] == "EXTERNAL_MANAGED"  # copied from the URL map's default
+    assert backend["backends"] == [{"group": f"https://www.googleapis.com/compute/v1/{LB_NEG}"}]
+    url_map = _url_map(gcp)
+    assert {"hosts": ["agent.example.com"], "pathMatcher": "agentless-sample-agent-dev"} | {
+        "description": "agentless sample-agent/dev"
+    } in url_map["hostRules"]
+    own = next(m for m in url_map["pathMatchers"] if m["name"] == "agentless-sample-agent-dev")
+    assert own["defaultService"].endswith(LB_BS)
+    _foreign_untouched(gcp)
+    assert _service(gcp)["ingress"] == "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"
+    info = make_run().info()
+    assert info["loadBalancer"]["routes"] == ["agent.example.com"]
+
+    assert actions(make_run())["loadBalancer"] == Action.NOOP  # a rerun changes nothing
+    calls = len(gcp.calls)
+    deploy(make_run())
+    assert "url_map_edit" not in gcp.kinds()[calls:]
+
+
+def test_agents_share_one_load_balancer_and_removing_one_keeps_the_others(
+    make_run, other_agent, gcp: FakeGcp, edit, lb
+) -> None:
+    edit(_behind_lb(hosts=["agent.example.com"]))
+    deploy(make_run())
+    deploy(other_agent("agent-b", hosts=["api.example.com"], pathPrefix="/b"))
+    deploy(other_agent("agent-c", hosts=["api.example.com"], pathPrefix="/c"))
+
+    api = next(m for m in _url_map(gcp)["pathMatchers"] if m["name"] == "api")
+    routed = {tuple(r["paths"]): r for r in api["pathRules"]}
+    assert set(routed) == {("/v1/*",), ("/b", "/b/*"), ("/c", "/c/*")}
+    assert routed[("/b", "/b/*")]["routeAction"] == {"urlRewrite": {"pathPrefixRewrite": "/"}}
+    assert routed[("/b", "/b/*")]["service"].endswith("/backendServices/agent-b-dev-lb")
+
+    assert other_agent("agent-b", hosts=["api.example.com"], pathPrefix="/b").remove(lambda _: True)
+    api = next(m for m in _url_map(gcp)["pathMatchers"] if m["name"] == "api")
+    assert {tuple(r["paths"]) for r in api["pathRules"]} == {("/v1/*",), ("/c", "/c/*")}
+    assert "projects/proj-dev/global/backendServices/agent-b-dev-lb" not in gcp.compute
+
+    assert make_run().remove(lambda _: True)
+    url_map = _url_map(gcp)
+    assert "agentless-sample-agent-dev" not in [m["name"] for m in url_map["pathMatchers"]]
+    assert all(r["pathMatcher"] != "agentless-sample-agent-dev" for r in url_map["hostRules"])
+    assert LB_BS not in gcp.compute and LB_NEG not in gcp.compute
+    _foreign_untouched(gcp)
+    assert "projects/proj-dev/global/backendServices/agent-c-dev-lb" in gcp.compute  # agent-c still served
+    assert actions(other_agent("agent-c", hosts=["api.example.com"], pathPrefix="/c"))["loadBalancer"] == Action.NOOP
+
+
+@pytest.mark.parametrize(
+    ("lb_config", "message"),
+    [
+        ({"hosts": ["www.example.com"]}, "already routed by path matcher web"),
+        (
+            {"hosts": ["new.example.com"], "pathPrefix": "/a"},
+            "no host rule of URL map shared-lb routes new.example.com",
+        ),
+        ({"hosts": ["api.example.com"], "pathPrefix": "/v1"}, "api.example.com/v1/* is already routed"),
+    ],
+)
+def test_load_balancer_conflicts_block_the_plan(make_run, gcp: FakeGcp, edit, lb, lb_config, message) -> None:
+    edit(_behind_lb(**lb_config))
+    _, changeset = make_run().plan(DeployOptions())
+    assert message in ({c.resource: c.blocked for c in changeset.changes}["loadBalancer"] or "")
+    with pytest.raises(DeployError, match="loadBalancer"):
+        deploy(make_run())
+    assert gcp.compute[LB_MAP]["hostRules"] == LB_FOREIGN["hostRules"]
+
+
+def test_path_prefix_on_another_agents_own_host_is_refused(make_run, other_agent, gcp: FakeGcp, edit, lb) -> None:
+    edit(_behind_lb(hosts=["agent.example.com"]))
+    deploy(make_run())  # agent.example.com is this agent's own host: removed with it
+    _, changeset = other_agent("agent-b", hosts=["agent.example.com"], pathPrefix="/b").plan(DeployOptions())
+    blocked = {c.resource: c.blocked for c in changeset.changes}["loadBalancer"] or ""
+    assert "another agentless agent's own path matcher" in blocked
+
+
+def test_dropping_the_load_balancer_detaches_it_and_keeps_the_service(make_run, gcp: FakeGcp, edit, lb) -> None:
+    edit(_behind_lb(hosts=["agent.example.com"]))
+    deploy(make_run())
+    edit(lambda d: d["cloudRun"].pop("loadBalancer"))
+    assert actions(make_run())["loadBalancer"] == Action.DELETE
+    deploy(make_run())
+    assert LB_BS not in gcp.compute and LB_NEG not in gcp.compute
+    assert gcp.compute[LB_MAP]["hostRules"] == LB_FOREIGN["hostRules"]
+    assert SERVICE in gcp.run_services
+    assert "loadBalancer" not in make_run().store.read().resources
+
+
+def test_a_concurrent_url_map_edit_is_redone_on_a_fresh_read(make_run, gcp: FakeGcp, edit, lb) -> None:
+    edit(_behind_lb(hosts=["agent.example.com"]))
+
+    def other_writer(url_map: dict) -> None:
+        url_map["hostRules"].append({"hosts": ["late.example.com"], "pathMatcher": "web"})
+
+    gcp.url_map_races.append(other_writer)
+    deploy(make_run())
+    hosts = {h for r in _url_map(gcp)["hostRules"] for h in r["hosts"]}
+    assert {"late.example.com", "agent.example.com", "www.example.com"} <= hosts
+
+
+def test_a_failure_mid_apply_is_finished_by_the_next_deploy(make_run, gcp: FakeGcp, edit, lb, monkeypatch) -> None:
+    edit(_behind_lb(hosts=["agent.example.com"]))
+    insert = gcp.compute_insert
+
+    def fail_backend(collection: str, body: dict) -> None:
+        if collection.endswith("/backendServices"):
+            monkeypatch.setattr(gcp, "compute_insert", insert)
+            raise RuntimeError("503 backend unavailable")
+        insert(collection, body)
+
+    monkeypatch.setattr(gcp, "compute_insert", fail_backend)
+    with pytest.raises(RuntimeError, match="503"):
+        deploy(make_run())
+    assert make_run().store.read().resources["loadBalancer"]["neg"] == LB_NEG  # tracked before the failure
+
+    deploy(make_run())
+    assert [c for c in gcp.calls if c == ("compute_insert", LB_NEG)] == [("compute_insert", LB_NEG)]
+    assert LB_BS in gcp.compute
+    assert make_run().remove(lambda _: True)
+    assert LB_NEG not in gcp.compute
+
+
+def test_moving_to_another_url_map_leaves_the_old_one_clean(make_run, gcp: FakeGcp, edit, lb) -> None:
+    other = gcp.add_url_map("other-lb")
+    edit(_behind_lb(hosts=["agent.example.com"]))
+    deploy(make_run())
+    edit(lambda d: d["cloudRun"]["loadBalancer"].update(urlMap="other-lb"))
+    deploy(make_run())
+    assert gcp.compute[LB_MAP]["hostRules"] == LB_FOREIGN["hostRules"]
+    assert gcp.compute[other]["hostRules"][0]["hosts"] == ["agent.example.com"]
+    assert ("compute_delete", LB_BS) not in gcp.calls  # same backend service, only the routes moved
+
+
+def test_a_scheme_the_url_map_cant_mix_blocks(make_run, gcp: FakeGcp, edit, lb) -> None:
+    edit(_behind_lb(hosts=["agent.example.com"], loadBalancingScheme="EXTERNAL"))
+    with pytest.raises(DeployError, match="can't mix schemes"):
+        deploy(make_run())
+    assert not [c for c in gcp.calls if c[0].startswith("compute") or c[0] == "url_map_edit"]
+
+
+def test_moving_to_a_classic_load_balancer_recreates_only_the_backend_service(make_run, gcp: FakeGcp, edit, lb) -> None:
+    classic = gcp.add_url_map("classic-lb", scheme="EXTERNAL")
+    edit(_behind_lb(hosts=["agent.example.com"]))
+    deploy(make_run())
+    edit(lambda d: d["cloudRun"]["loadBalancer"].update(urlMap="classic-lb"))
+    deploy(make_run())
+    assert gcp.compute[LB_BS]["loadBalancingScheme"] == "EXTERNAL"
+    assert ("compute_delete", LB_NEG) not in gcp.calls  # the NEG doesn't depend on the scheme
+    assert gcp.compute[LB_MAP]["hostRules"] == LB_FOREIGN["hostRules"]
+    assert gcp.compute[classic]["hostRules"][0]["hosts"] == ["agent.example.com"]
+    assert actions(make_run())["loadBalancer"] == Action.NOOP
+
+
+@pytest.mark.parametrize(
+    "lb_config", [{"hosts": ["agent.example.com"]}, {"hosts": ["api.example.com"], "pathPrefix": "/a"}]
+)
+def test_renaming_the_service_moves_the_routes_to_new_resources(make_run, gcp: FakeGcp, edit, lb, lb_config) -> None:
+    edit(_behind_lb(**lb_config))
+    deploy(make_run())
+    edit(lambda d: d["cloudRun"].update(serviceName="renamed"))
+    _, changeset = make_run().plan(DeployOptions())
+    assert not changeset.blocked
+    deploy(make_run())
+    assert LB_BS not in gcp.compute and LB_NEG not in gcp.compute
+    new_bs = "projects/proj-dev/global/backendServices/renamed-lb"
+    assert gcp.compute["projects/proj-dev/regions/europe-west1/networkEndpointGroups/renamed-neg"]["cloudRun"] == {
+        "service": "renamed"
+    }
+    refs = json.dumps(_url_map(gcp))
+    assert "sample-agent-dev" not in refs and new_bs in refs
+    _foreign_untouched(gcp)
+    assert actions(make_run())["loadBalancer"] == Action.NOOP
+    assert make_run().remove(lambda _: True)
+    assert not [p for p in gcp.compute if "renamed" in p or "sample-agent-dev" in p]
+
+
+def test_a_rename_after_a_failed_first_deploy_leaks_nothing(make_run, gcp: FakeGcp, edit, lb, monkeypatch) -> None:
+    edit(_behind_lb(hosts=["agent.example.com"]))
+    real = gcp.url_map_edit
+
+    def fail(path: str, fn: Callable) -> bool:
+        raise RuntimeError("500 backend error")
+
+    monkeypatch.setattr(gcp, "url_map_edit", fail)
+    with pytest.raises(RuntimeError, match="500"):
+        deploy(make_run())
+    monkeypatch.setattr(gcp, "url_map_edit", real)
+    edit(lambda d: d["cloudRun"].update(serviceName="renamed"))
+    deploy(make_run())
+    assert LB_BS not in gcp.compute and LB_NEG not in gcp.compute
+    assert make_run().remove(lambda _: True)
+    assert not [p for p in gcp.compute if "renamed" in p or "sample-agent-dev" in p]
+
+
+def test_an_adopted_backend_with_the_wrong_scheme_is_recreated(make_run, gcp: FakeGcp, edit, lb) -> None:
+    # left by a crashed run under an older config: ours (marker), but not what the URL map needs
+    gcp.compute[LB_NEG] = {
+        "name": "sample-agent-dev-neg",
+        "description": "agentless sample-agent/dev",
+        "networkEndpointType": "SERVERLESS",
+        "cloudRun": {"service": "sample-agent-dev"},
+    }
+    gcp.compute[LB_BS] = {
+        "name": "sample-agent-dev-lb",
+        "description": "agentless sample-agent/dev",
+        "loadBalancingScheme": "EXTERNAL",
+        "backends": [{"group": f"https://www.googleapis.com/compute/v1/{LB_NEG}"}],
+    }
+    edit(_behind_lb(hosts=["agent.example.com"]))
+    deploy(make_run())
+    assert gcp.compute[LB_BS]["loadBalancingScheme"] == "EXTERNAL_MANAGED"
+    assert ("compute_delete", LB_NEG) not in gcp.calls
+    assert make_run().store.read().resources["loadBalancer"]["scheme"] == "EXTERNAL_MANAGED"
+
+
+def test_a_route_taken_between_plan_and_apply_unroutes_nothing(make_run, gcp: FakeGcp, edit, lb) -> None:
+    edit(_behind_lb(hosts=["agent.example.com"]))
+    deploy(make_run())
+    other = gcp.add_url_map("other-lb")
+    edit(lambda d: d["cloudRun"]["loadBalancer"].update(urlMap="other-lb"))
+    provider = make_run()
+
+    def confirm(_: object) -> bool:  # someone takes the host on the new map after the plan was shown
+        gcp.compute[other]["hostRules"] = [{"hosts": ["agent.example.com"], "pathMatcher": "x"}]
+        gcp.compute[other]["pathMatchers"] = [{"name": "x", "defaultService": gcp.compute[other]["defaultService"]}]
+        return True
+
+    with pytest.raises(RuntimeError, match="already routed"):
+        provider.deploy(DeployOptions(), confirm)
+    assert any(r["pathMatcher"] == "agentless-sample-agent-dev" for r in gcp.compute[LB_MAP]["hostRules"])
+    assert LB_BS in gcp.compute
+
+
+def test_load_balancer_plan_blocks_without_a_url_map_or_a_scheme(make_run, gcp: FakeGcp, edit) -> None:
+    edit(_behind_lb(hosts=["agent.example.com"]))
+    _, changeset = make_run().plan(DeployOptions())
+    assert "URL map projects/proj-dev/global/urlMaps/shared-lb not found" in (changeset.blocked[0].blocked or "")
+    path = gcp.add_url_map("shared-lb")
+    gcp.compute[path]["defaultService"] = (
+        "https://www.googleapis.com/compute/v1/projects/proj-dev/global/backendBuckets/b"
+    )
+    _, changeset = make_run().plan(DeployOptions())
+    assert "set cloudRun.loadBalancer.loadBalancingScheme" in (changeset.blocked[0].blocked or "")
+
+
+def test_an_existing_neg_not_made_by_agentless_blocks(make_run, gcp: FakeGcp, edit, lb) -> None:
+    gcp.compute[LB_NEG] = {"name": "sample-agent-dev-neg", "description": "made by hand"}
+    edit(_behind_lb(hosts=["agent.example.com"]))
+    with pytest.raises(DeployError, match="not managed by agentless"):
+        deploy(make_run())
+
+
+def test_remove_survives_a_url_map_deleted_outside_agentless(make_run, gcp: FakeGcp, edit, lb) -> None:
+    edit(_behind_lb(hosts=["agent.example.com"]))
+    deploy(make_run())
+    gcp.compute.pop(LB_MAP)
+    assert make_run().remove(lambda _: True)
+    assert LB_BS not in gcp.compute
+
+
+@pytest.mark.parametrize(
+    ("lb_config", "message"),
+    [
+        ({"urlMap": "x", "hosts": ["Bad_Host"]}, "lowercase hostname"),
+        ({"urlMap": "x", "hosts": ["a.example.com"], "regional": True, "loadBalancingScheme": "EXTERNAL"}, "regional"),
+        ({"urlMap": "x", "hosts": []}, "at least 1"),
+        ({"urlMap": "x", "hosts": ["a.example.com"], "pathPrefix": "b/"}, "pathPrefix"),
+    ],
+)
+def test_load_balancer_schema_rules(run_dir: Path, edit, lb_config, message) -> None:
+    edit(lambda d: d.setdefault("cloudRun", {}).update(loadBalancer=lb_config))
+    with pytest.raises(ConfigError, match=message):
+        load_project(run_dir / "agent.yaml")
+
+
+def test_a_crash_after_the_url_map_edit_is_recorded_by_the_next_deploy(
+    make_run, gcp: FakeGcp, edit, lb, monkeypatch
+) -> None:
+    edit(_behind_lb(hosts=["agent.example.com"]))
+    real = gcp.url_map_edit
+
+    def edit_then_crash(path: str, fn: Callable) -> bool:
+        real(path, fn)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(gcp, "url_map_edit", edit_then_crash)
+    with pytest.raises(KeyboardInterrupt):
+        deploy(make_run())
+    monkeypatch.setattr(gcp, "url_map_edit", real)
+    assert make_run().store.read().resources["loadBalancer"]["urlMap"] == LB_MAP  # saved before the edit
+    assert actions(make_run())["loadBalancer"] == Action.UPDATE
+    deploy(make_run())
+    assert make_run().info()["loadBalancer"]["routes"] == ["agent.example.com"]
+    assert make_run().remove(lambda _: True)
+    assert _url_map(gcp)["hostRules"] == LB_FOREIGN["hostRules"]
+
+
+def test_compute_calls_retry_while_the_url_map_is_busy(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from agentless.providers.cloud_run import clients as run_clients
+
+    answers = [
+        SimpleNamespace(status_code=400, ok=False, text='{"reason": "resourceNotReady"}', content=b"x"),
+        SimpleNamespace(status_code=400, ok=False, text='{"reason": "resourceInUseByAnotherResource"}', content=b"x"),
+        SimpleNamespace(status_code=200, ok=True, text="", content=b"{}", json=lambda: {"status": "DONE"}),
+    ]
+    seen = []
+
+    class Http:
+        def request(self, method: str, url: str, **_: object) -> SimpleNamespace:
+            seen.append(method)
+            return answers.pop(0)
+
+    monkeypatch.setattr(run_clients.time, "sleep", lambda _: None)
+    client = run_clients.CloudRunClients.__new__(run_clients.CloudRunClients)
+    client.__dict__["_http"] = Http()
+    client.compute_delete("projects/p/global/backendServices/x")
+    assert seen == ["DELETE"] * 3
+
+    answers.append(SimpleNamespace(status_code=400, ok=False, text="invalid field", content=b"x"))
+    with pytest.raises(RuntimeError, match="invalid field"):
+        client.compute_insert("projects/p/global/backendServices", {"name": "x"})
