@@ -36,6 +36,12 @@ cloudRun:
   # tags:                                  # bound on the service before it opens (org policies such as
   #   "123456789012/allowIngressAllForCloudRun": allow-ingress-all   #   run.allowedIngress check them)
   vpcEgress: { network: acme-vpc, subnetwork: agents-europe-west1, egress: private-ranges-only }
+  # loadBalancer:                          # serve it behind an existing, shared load balancer (with
+  #   urlMap: acme-agents-lb               #   ingress: internal-and-cloud-load-balancing): its own serverless NEG
+  #   hosts: [agents.acme.example.com]     #   and backend service, and only its own entries in the URL map
+  #   pathPrefix: /support                 # share the hosts: <prefix>/* is routed here, prefix stripped
+  #   # regional: true                     # regional URL map in provider.region
+  #   # loadBalancingScheme: EXTERNAL_MANAGED   # default: the scheme of the URL map's default backend service
   timeout: 600s
   cpuThrottling: false
   sessionAffinity: true

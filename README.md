@@ -501,8 +501,46 @@ access:
 | 2 | `sessionEngine` | a bare reasoning engine (no code) holding sessions and the Memory Bank, when `memory.sessions` is `agentPlatform` (the default) or `memory.memoryBank` is set. The service gets `GOOGLE_CLOUD_AGENT_ENGINE_ID`, and the runtime SA `roles/aiplatform.user` on that engine only (declare model access, e.g. `roles/aiplatform.user` on the project, in `identity.roles` as on Agent Runtime). Use `sessions: inMemory` to skip it |
 | 3 | `build` | the image: the packaged source is uploaded to the staging bucket, built by Cloud Build and pushed to `<region>-docker.pkg.dev/<project>/<cloudRun.artifactRegistry>/<service>:<hash>`. The tag hashes the source and build args, so an image already in the registry is never rebuilt. Skipped when `cloudRun.image` is set (built in CI) |
 | 4 | `service` | the Cloud Run service, `<service>-<stage>` unless `cloudRun.serviceName`. Its config is diffed against the last-applied spec. Each change is a new revision, and the image is pinned by digest. `APP_URL` is the service's `run.app` URL, which is known before creation. `cloudRun.tags` are bound on the service (see [Tags](#cloud-run-tags)) |
-| 5 | `access` | `roles/run.invoker` on the service for `access.invokers` and the Gemini Enterprise service agent |
-| 6 | `agentRegistry`, `geminiEnterprise` | the agent card served by the service (Gemini Enterprise registration is `a2a` on Cloud Run) |
+| 5 | `loadBalancer` | with `cloudRun.loadBalancer`: a serverless NEG and a backend service for the agent, routed from an existing load balancer's URL map (see [Behind a load balancer](#cloud-run-load-balancer)) |
+| 6 | `access` | `roles/run.invoker` on the service for `access.invokers` and the Gemini Enterprise service agent |
+| 7 | `agentRegistry`, `geminiEnterprise` | the agent card served by the service (Gemini Enterprise registration is `a2a` on Cloud Run) |
+
+<a id="cloud-run-load-balancer"></a>
+**Behind a load balancer (`cloudRun.loadBalancer`).** Serves the agent through an existing Application Load
+Balancer that several agents (and your own services) share. The load balancer itself (forwarding rule, proxy,
+certificate, URL map) stays in your IaC; agentless plugs the agent into it:
+
+```yaml
+cloudRun:
+  ingress: internal-and-cloud-load-balancing   # only through the load balancer (ingress all keeps run.app open too)
+  loadBalancer:
+    urlMap: acme-agents-lb                      # in provider.project; `regional: true` for a regional one
+    hosts: [support.agents.acme.example.com]    # this agent gets the host to itself
+    # pathPrefix: /support                      # or: share a host your IaC routes; <prefix>/* comes here
+```
+
+- **Owned by the agent:** a serverless NEG `<service>-<stage>-neg` and a backend service `<service>-<stage>-lb`,
+  whose scheme is copied from the URL map's default backend service (or `loadBalancingScheme`).
+- **In the URL map, only its own entries:** without `pathPrefix`, a host rule and a path matcher named
+  `agentless-<service>-<stage>`. With `pathPrefix`, path rules `<prefix>` and `<prefix>/*` pointing at its backend
+  service, prefix stripped (`pathPrefixRewrite: /`), inside the path matcher your IaC already routes the host to.
+  Every edit is a read-modify-write on the URL map's fingerprint and is redone on a fresh read if another agent or
+  your IaC wrote in between.
+- **Nothing foreign is touched:** a host already routed elsewhere, a path already taken, a host with no host rule
+  (with `pathPrefix`), a path matcher using `routeRules`, or another agent's own path matcher blocks the plan.
+  `remove`, or dropping `loadBalancer`, strips the agent's entries first, then deletes its backend service and NEG.
+  The other agents keep serving.
+- **IAM still applies:** callers through the load balancer need `roles/run.invoker` and a Google ID token whose
+  audience is the service's `run.app` URL. For token-less callers, put IAP or Cloud Armor on the load balancer in
+  your IaC.
+- **If Terraform owns the URL map,** its next apply removes every entry agents added, and they stay unrouted until
+  each redeploys. Add `lifecycle { ignore_changes = [host_rule, path_matcher] }` to the `google_compute_url_map`, or
+  keep agent routes out of Terraform's view some other way.
+- With `pathPrefix`, the prefix is served on **every** host the IaC's path matcher routes, not only those listed.
+- A host someone adds by hand to an agent's own host rule goes away when the agent is removed or moved.
+- A renamed service (`cloudRun.serviceName`, `service`), a scheme change, or a move to another URL map recreates
+  what has to change, unrouting first. Conflicts are checked on a fresh read before anything is unrouted.
+- The deployer needs `roles/compute.loadBalancerAdmin` (NEG, backend service, URL map) in the project.
 
 **Never public** (unless you opt into [`auth: webhook`](#webhook-mode)). Every caller needs a Google identity that
 holds `roles/run.invoker`:
@@ -749,7 +787,7 @@ Without a TTY (CI), `deploy` applies without asking, like `serverless deploy`. W
 |---|---|
 | Deployer (your user, a CI service account via Workload Identity Federation, or the impersonated `provider.deployer`) | `roles/aiplatform.admin`, `roles/iam.serviceAccountAdmin`, `roles/iam.serviceAccountUser`, `roles/resourcemanager.projectIamAdmin`, `roles/storage.objectAdmin` on the state bucket, `roles/secretmanager.admin` (or `setIamPolicy`) on the agent's secrets, `roles/discoveryengine.editor` to publish (`roles/discoveryengine.admin` on the app for `agentGateway`), `roles/agentregistry.editor` for `publish.agentRegistry`, `roles/storage.admin` when `resources.buckets` is used, `roles/monitoring.viewer` for `agentless metrics`, `roles/storage.objectAdmin` on `evaluation.dest` for `agentless eval`. Org-level grants also need org IAM admin. Leave `identity.roles.organization` out until that's approved. |
 | Vertex AI service agents (evaluation) | the Evaluation Service writes results to `evaluation.dest` and calls the engine; grant its service agent `roles/storage.objectAdmin` on that bucket if the run reports a permission error |
-| Deployer, Cloud Run target | instead of `roles/aiplatform.admin`: `roles/run.admin` (also lets agentless read the agent card), `roles/cloudbuild.builds.editor`, `roles/artifactregistry.reader` on the repository, `roles/storage.objectAdmin` on the staging bucket, `roles/iam.serviceAccountUser` on the runtime SA (and on the build SA). Keep `roles/aiplatform.admin` when a session engine is used |
+| Deployer, Cloud Run target | instead of `roles/aiplatform.admin`: `roles/run.admin` (also lets agentless read the agent card), `roles/cloudbuild.builds.editor`, `roles/artifactregistry.reader` on the repository, `roles/storage.objectAdmin` on the staging bucket, `roles/iam.serviceAccountUser` on the runtime SA (and on the build SA). Keep `roles/aiplatform.admin` when a session engine is used. With `cloudRun.loadBalancer`, `roles/compute.loadBalancerAdmin` (NEG, backend service, URL map) |
 | Cloud Build service account | `roles/artifactregistry.writer` on the repository, `roles/storage.objectViewer` on the staging bucket, `roles/logging.logWriter` |
 | Caller, when impersonating a deployer | `roles/iam.serviceAccountTokenCreator` on the deployer SA (and on each delegate) |
 | Runtime SA or Agent Identity principal | what `identity.roles` lists, plus automatic grants: secrets, the artifacts bucket, declared buckets, and with tracing on `cloudtrace.agent`, `logging.logWriter`, `monitoring.metricWriter` |

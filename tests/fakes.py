@@ -35,6 +35,8 @@ class FakeGcp:
         self.all_users_tag: str | None = None
         # Simulated run.managed.requireInvokerIam: services must keep the invoker IAM check on.
         self.require_invoker_iam = False
+        self.compute: dict[str, dict[str, Any]] = {}  # Compute resources by projects/… path
+        self.url_map_races: list[Any] = []  # callbacks that edit a URL map between a read and its write
         self.ar_repositories: set[str] = {"cloud-run-source-deploy"}
         self.ar_images: dict[str, str] = {}  # image:tag -> digest
         self.uploads: dict[tuple[str, str], int] = {}  # (bucket, object) -> size
@@ -270,6 +272,97 @@ class FakeGcp:
             for value, name in list(tags.items()):
                 if name == binding:
                     tags.pop(value)
+
+    # Compute Engine: serverless NEGs, backend services, URL maps (keyed by projects/… path)
+    def add_url_map(self, name: str, *, scheme: str = "EXTERNAL_MANAGED", regional: bool = False, **fields: Any) -> str:
+        """Seed a load balancer owned by someone else: a URL map and its default backend service."""
+        scope = f"regions/{self.region}" if regional else "global"
+        default = f"projects/{self.project}/{scope}/backendServices/{name}-default"
+        self.compute[default] = {"name": f"{name}-default", "loadBalancingScheme": scheme, "backends": []}
+        path = f"projects/{self.project}/{scope}/urlMaps/{name}"
+        self.compute[path] = {
+            "name": name,
+            "defaultService": f"https://www.googleapis.com/compute/v1/{default}",
+            "fingerprint": f"fp-{next(self._ids)}",
+            **json.loads(json.dumps(fields)),
+        }
+        return path
+
+    def compute_get(self, path: str) -> dict[str, Any] | None:
+        resource = self.compute.get(path)
+        return None if resource is None else json.loads(json.dumps(resource))
+
+    @staticmethod
+    def _refs(value: Any) -> set[str]:
+        if isinstance(value, str):
+            index = value.find("projects/")
+            return {value[index:]} if index >= 0 else set()
+        if isinstance(value, dict):
+            return set().union(*(FakeGcp._refs(v) for k, v in value.items() if k not in ("selfLink", "description")))
+        if isinstance(value, list):
+            return set().union(*(FakeGcp._refs(v) for v in value))
+        return set()
+
+    def _missing_refs(self, body: dict[str, Any]) -> list[str]:
+        return sorted(r for r in self._refs(body) if r not in self.compute)
+
+    def compute_insert(self, collection: str, body: dict[str, Any]) -> None:
+        path = f"{collection}/{body['name']}"
+        if path in self.compute:
+            raise RuntimeError(f"409 {path} already exists")
+        if missing := self._missing_refs(body):
+            raise RuntimeError(f"400 {path} references missing resources: {missing}")
+        kind = collection.rsplit("/", 1)[-1]
+        if kind == "networkEndpointGroups" and not (body.get("cloudRun") or {}).get("service"):
+            raise RuntimeError("400 a serverless NEG needs cloudRun.service")
+        if kind == "backendServices" and not body.get("loadBalancingScheme"):
+            raise RuntimeError("400 loadBalancingScheme is required")
+        self.calls.append(("compute_insert", path))
+        self.compute[path] = {
+            **json.loads(json.dumps(body)),
+            "selfLink": f"https://www.googleapis.com/compute/v1/{path}",
+        }
+
+    def compute_delete(self, path: str) -> None:
+        self.calls.append(("compute_delete", path))
+        if path not in self.compute:
+            return
+        users = sorted(p for p, r in self.compute.items() if p != path and path in self._refs(r))
+        if users:
+            raise RuntimeError(f"400 resourceInUseByAnotherResource: {path} is used by {users}")
+        self.compute.pop(path)
+
+    def url_map_edit(self, path: str, edit: Any) -> bool:
+        for _ in range(5):
+            url_map = self.compute_get(path)
+            if url_map is None:
+                raise RuntimeError(f"404 URL map {path} not found")
+            if not edit(url_map):
+                return False
+            if self.url_map_races:  # someone else writes between our read and our PUT
+                self.url_map_races.pop(0)(self.compute[path])
+                self.compute[path]["fingerprint"] = f"fp-{next(self._ids)}"
+            if url_map.get("fingerprint") != self.compute[path].get("fingerprint"):
+                continue  # 412 conditionNotMet: read again and redo the edit
+            if missing := self._missing_refs(url_map):
+                raise RuntimeError(f"400 URL map references missing resources: {missing}")
+            schemes = {
+                self.compute[r].get("loadBalancingScheme") for r in self._refs(url_map) if "/backendServices/" in r
+            }
+            if len(schemes) > 1:
+                raise RuntimeError(f"400 a URL map can't mix load balancing schemes: {sorted(map(str, schemes))}")
+            matchers = [m["name"] for m in url_map.get("pathMatchers", [])]
+            if len(matchers) != len(set(matchers)):
+                raise RuntimeError("400 duplicate path matcher names")
+            hosts = [h for r in url_map.get("hostRules", []) for h in r.get("hosts", [])]
+            if len(hosts) != len(set(hosts)):
+                raise RuntimeError("400 a host is in several host rules")
+            if any(r.get("pathMatcher") not in matchers for r in url_map.get("hostRules", [])):
+                raise RuntimeError("400 a host rule names a missing path matcher")
+            self.calls.append(("url_map_edit", path))
+            self.compute[path] = {**url_map, "fingerprint": f"fp-{next(self._ids)}"}
+            return True
+        raise RuntimeError(f"412 URL map {path} kept changing")
 
     # Artifact Registry / Cloud Build
     def ar_repository_exists(self, repository: str) -> bool:

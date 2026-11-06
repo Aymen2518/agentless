@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import time
 import urllib.parse
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +16,7 @@ from agentless.providers.agent_runtime.clients import _IAM_RETRIES, Binding, Gcp
 _RUN = "https://run.googleapis.com/v2"
 _BUILD = "https://cloudbuild.googleapis.com/v1"
 _AR = "https://artifactregistry.googleapis.com/v1"
+_COMPUTE = "https://compute.googleapis.com/compute/v1"
 _BUILDER = "gcr.io/cloud-builders/docker"
 _BUILD_DONE = ("SUCCESS", "FAILURE", "INTERNAL_ERROR", "TIMEOUT", "CANCELLED", "EXPIRED")
 
@@ -136,6 +137,72 @@ class CloudRunClients(GcpClients):
             raise RuntimeError(f"GET {url} -> {response.status_code}: {response.text}")
         return response.json()
 
+    # --- load balancer (Compute Engine) ----------------------------------------------------------------------------
+    # Paths are relative to the Compute v1 root: projects/<p>/(global|regions/<r>)/<collection>/<name>.
+
+    def compute_get(self, path: str) -> dict[str, Any] | None:
+        """A Compute resource (NEG, backend service, URL map), or None when it does not exist."""
+        return self._get_or_none(f"{_COMPUTE}/{path}")
+
+    def compute_insert(self, collection: str, body: dict[str, Any]) -> None:
+        """Create a resource in `collection` (its path without the name) and wait for the operation."""
+        self._compute_wait(self._compute_call("POST", f"{_COMPUTE}/{collection}", json=body))
+
+    def compute_delete(self, path: str) -> None:
+        """Delete a resource and wait; a missing one is a no-op.
+
+        Right after a URL map stops routing a backend service, Compute may still call it in use for a moment.
+        """
+        operation = self._compute_call("DELETE", f"{_COMPUTE}/{path}", busy=("resourceInUseByAnotherResource",))
+        if operation:
+            self._compute_wait(operation)
+
+    def _compute_call(self, method: str, url: str, *, busy: tuple[str, ...] = (), json: Any = None) -> dict[str, Any]:
+        """A Compute call, retried while the resource is busy with another operation (another agent, the IaC)."""
+        for attempt in range(_COMPUTE_RETRIES):
+            response = self._http.request(method, url, json=json, timeout=60)
+            if response.status_code == 404 and method == "DELETE":
+                return {}
+            if response.ok:
+                return response.json() if response.content else {}
+            if not _compute_busy(response, busy) or attempt == _COMPUTE_RETRIES - 1:
+                raise RuntimeError(f"{method} {url} -> {response.status_code}: {response.text}")
+            time.sleep(min(2**attempt, 20))
+        return {}  # unreachable: the last attempt raises
+
+    def url_map_edit(self, path: str, edit: Callable[[dict[str, Any]], bool]) -> bool:
+        """Read-modify-write a shared URL map; returns whether it changed.
+
+        `edit` changes the map in place and says whether it did. The PUT carries the fingerprint it read, so a
+        concurrent edit (another agent, the load balancer's IaC) fails with 412 and the edit is redone on a fresh read.
+        """
+        url = f"{_COMPUTE}/{path}"
+        for attempt in range(_IAM_RETRIES):
+            url_map = self._get_or_none(url)
+            if url_map is None:
+                raise RuntimeError(f"404 URL map {path} not found")
+            if not edit(url_map):
+                return False
+            response = self._http.put(url, json=url_map, timeout=60)
+            if response.ok:
+                self._compute_wait(response.json())
+                return True
+            retry = response.status_code in (409, 412) or _compute_busy(response, ())
+            if not retry or attempt == _IAM_RETRIES - 1:
+                raise RuntimeError(f"PUT {url} -> {response.status_code}: {response.text}")
+            time.sleep(2**attempt)
+        return False  # unreachable: the last attempt raises
+
+    def _compute_wait(self, operation: dict[str, Any], timeout: float = 600) -> None:
+        start = time.monotonic()
+        while operation.get("status") != "DONE":
+            if time.monotonic() - start > timeout:
+                raise RuntimeError(f"operation {operation.get('name')} still running after {int(timeout)}s")
+            time.sleep(2)
+            operation = self._rest("GET", operation["selfLink"])
+        if errors := (operation.get("error") or {}).get("errors"):
+            raise RuntimeError(f"operation {operation.get('name')} on {operation.get('targetLink')} failed: {errors}")
+
     # --- Artifact Registry and Cloud Build -------------------------------------------------------------------------
 
     def ar_repository_exists(self, repository: str) -> bool:
@@ -241,6 +308,15 @@ class CloudRunClients(GcpClients):
                 time.sleep(min(2**attempt, 15))
             statuses.append(status)
         return statuses
+
+
+_COMPUTE_RETRIES = 6  # about a minute of backoff
+
+
+def _compute_busy(response: Any, reasons: tuple[str, ...]) -> bool:
+    """A 400 for a resource another operation holds (resourceNotReady), or one of `reasons`."""
+    text = getattr(response, "text", "") or ""
+    return response.status_code == 400 and any(r in text for r in ("resourceNotReady", *reasons))
 
 
 _PROBE_ATTEMPTS = 25  # about 6 minutes of backoff: IAM changes usually propagate within a few

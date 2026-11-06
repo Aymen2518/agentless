@@ -58,6 +58,28 @@ User docs: README "Cloud Run target", `examples/cloud-run.yaml`.
    `//run.googleapis.com/projects/<number>/locations/<region>/services/<id>`. `FakeGcp.ingress_all_tag` simulates
    the org policy.
 
+6. **Load balancer (`cloudRun.loadBalancer`, 2026-11-06):** the user wanted several Cloud Run agents behind one
+   existing load balancer, with `remove` never affecting the others. `LoadBalancerResource` (between `service` and
+   `access`) owns a serverless NEG `<svc>-neg` and a backend service `<svc>-lb` (description
+   `agentless <service>/<stage>`; one without it blocks). The scheme comes from the URL map's default backend
+   service unless `loadBalancingScheme` is set; a scheme, scope or service-name change recreates both (strip routes,
+   delete BS, delete NEG, create). In the URL map it owns only: host mode, a host rule + path matcher named
+   `agentless-<svc>`; path mode (`pathPrefix`), path rules whose `service` is its backend service, with
+   `pathPrefixRewrite: /`, inside a matcher the IaC owns. `routing.py` is pure (owned/strip/conflicts/attach/
+   reconcile). Edits go through `url_map_edit` (GET, edit, PUT with the fingerprint, retry on 409/412).
+   Conflicts block: host already routed (host mode), no host rule / routeRules matcher / path taken / another
+   agent's `agentless-*` matcher (path mode). `state.loadBalancer.urlMap` is saved before the edit so a crash
+   is stripped on the next run. Callers still need `run.invoker` (ID token audience = run.app URL).
+   Fakes: `add_url_map`, `url_map_races`, fingerprint 412, in-use deletes, dangling references and mixed
+   schemes fail.
+   `_survey` (shared by plan and apply) decides from live resources and state, not only from `spec`: a recorded
+   NEG/backend under other names, a live backend with another scheme or NEG, or a NEG for another service are
+   deleted and recreated; old entries are stripped by the *recorded* matcher/backend; conflicts are computed with
+   them left out, and apply re-checks on a fresh read before unrouting anything (the first review found a rename
+   always blocked, a leak after a failed first deploy, and an explicit scheme the map can't mix).
+   `_compute_call` retries 400 `resourceNotReady` (and `resourceInUseByAnotherResource` on delete);
+   `url_map_edit` retries `resourceNotReady` too. An empty matcher or backend strips nothing.
+
 ## Resource notes
 - **`ServiceResource`:**
   - Its spec (`cloud_run/spec.desired_spec`) is a flat dict like the engine spec, so `spec.diff`, `describe` and
@@ -113,7 +135,25 @@ User docs: README "Cloud Run target", `examples/cloud-run.yaml`.
   the SA, its project bindings and the uploaded sources.
 - An anonymous request to the service returns 403.
 
+## Verified live (2026-11-06, `cloudRun.loadBalancer`, a personal sandbox project)
+- Global external ALB (`EXTERNAL_MANAGED`, HTTP) built with gcloud as "the IaC" (default Cloud Run backend, an `api`
+  matcher with `/v1/*`), two agents with an echo image: one in host mode, one with `pathPrefix: /b` on the IaC's
+  host. `plan` read the scheme from the default backend; NEG and backend creates, the URL map PUT with the
+  fingerprint and operation polling on `selfLink` worked. A path rule with `service` + `routeAction.urlRewrite`
+  was accepted.
+- Traffic: `/b` → `/`, `/b/run_sse` → `/run_sse`, `/b/apps/x/y?q=1` → `/apps/x/y` with the query kept, `/bx` and
+  `/v1/x` stayed on the IaC's service. Without an ID token: 403 (Cloud Run IAM). With ingress
+  `internal-and-cloud-load-balancing`, the run.app URL answered 404. A user ID token
+  (`gcloud auth print-identity-token`) passed through the load balancer.
+- New URL map routes took about 3 minutes to serve. Reruns planned no-ops. Removing one agent removed only its
+  path rule, backend and NEG (the backend delete right after unrouting succeeded); the other agent kept serving;
+  removing the last agent left the URL map exactly as the IaC made it.
+- A first deploy right after the runtime SA was created failed once with `iam.serviceaccounts.actAs denied` (new
+  SA not propagated); the rerun finished it. Not specific to the load balancer.
+
 ## Not verified against live APIs
+- `cloudRun.loadBalancer` on a classic (`EXTERNAL`) or regional/internal load balancer (only the global
+  `EXTERNAL_MANAGED` one was tested live).
 - `cloudRun.tags`: the regional tagBindings list/create/delete on a Cloud Run service and the LRO polling on the
   regional endpoint.
 - `auth: googleToken`: that Cloud Run accepts `X-Serverless-Authorization` from user and impersonated tokens and

@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+- **Cloud Run agents behind an existing, shared load balancer, `cloudRun.loadBalancer`.** agentless creates a
+  serverless NEG and a backend service for the agent and routes `hosts` (its own host rule and path matcher) or
+  `hosts` + `pathPrefix` (path rules, prefix stripped, in a path matcher your IaC owns) to it in the URL map. Only
+  the agent's own entries are ever added or removed, with fingerprint retries, so several agents can share one
+  load balancer and removing one leaves the others serving. Conflicts with existing routes block the plan.
+
 ## [0.12.0] - 2026-10-30
 
 ### Changed

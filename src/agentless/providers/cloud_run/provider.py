@@ -40,6 +40,14 @@ class CloudRunProvider(BaseProvider):
             }
             if service.get("cardUrl"):
                 out["a2aCardUrl"] = service["cardUrl"]
+        if spec := (state.resources.get("loadBalancer") or {}).get("spec"):
+            prefix = spec.get("pathPrefix") or ""
+            out["loadBalancer"] = {
+                "urlMap": spec["urlMap"],
+                "routes": [f"{host}{prefix}" for host in spec["hosts"]],
+                "backendService": spec["backendService"],
+                "neg": spec["neg"],
+            }
         if engine := (state.resources.get("sessionEngine") or {}).get("name"):
             out["sessionEngine"] = engine
         if buckets := (state.resources.get("buckets") or {}).get("items"):

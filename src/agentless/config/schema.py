@@ -194,6 +194,55 @@ class Webhook(_Model):
         return _app_header(v)
 
 
+_HOST_RE = re.compile(r"^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$")
+
+
+class LoadBalancer(_Model):
+    """Existing Application Load Balancer that serves the service, through a serverless NEG and a backend service.
+
+    The load balancer is shared: agentless adds only its own entries to the URL map and removes only those.
+    """
+
+    url_map: str = Field(
+        pattern=r"^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$",
+        description="Name of the load balancer's URL map, in provider.project.",
+    )
+    regional: bool = Field(
+        default=False,
+        description="The URL map is regional, in provider.region (regional external or internal load balancer); "
+        "global otherwise.",
+    )
+    hosts: list[str] = Field(min_length=1, description="Hostnames routed to the agent.")
+    path_prefix: str | None = Field(
+        default=None,
+        pattern=r"^(/[A-Za-z0-9._~-]+)+$",
+        description="Share the hosts with other services: only <prefix> and <prefix>/* go to the agent, with the "
+        "prefix stripped. The hosts must already be routed by a host rule of the URL map that your IaC owns. "
+        "Without it, the agent gets its own host rule and path matcher for the hosts.",
+    )
+    load_balancing_scheme: Literal["EXTERNAL_MANAGED", "EXTERNAL", "INTERNAL_MANAGED"] | None = Field(
+        default=None,
+        description="Scheme of the agent's backend service. Defaults to the scheme of the URL map's default "
+        "backend service.",
+    )
+
+    @field_validator("hosts")
+    @classmethod
+    def _hosts(cls, v: list[str]) -> list[str]:
+        for host in v:
+            if not _HOST_RE.fullmatch(host):
+                raise ValueError(f"host {host!r} must be a lowercase hostname, optionally starting with '*.'")
+        if len(set(v)) != len(v):
+            raise ValueError("hosts must be unique")
+        return v
+
+    @model_validator(mode="after")
+    def _scheme(self) -> LoadBalancer:
+        if self.regional and self.load_balancing_scheme == "EXTERNAL":
+            raise ValueError("a regional load balancer has no EXTERNAL (classic) scheme; use EXTERNAL_MANAGED")
+        return self
+
+
 class CloudRun(_Model):
     """Cloud Run service settings (provider.name: cloud-run); callers need roles/run.invoker (allUsers with webhook)."""
 
@@ -228,6 +277,12 @@ class CloudRun(_Model):
     google_token: GoogleToken | None = Field(default=None, description="Settings of auth: googleToken.")
     webhook: Webhook | None = Field(default=None, description="Settings of auth: webhook.")
     vpc_egress: VpcEgress | None = None
+    load_balancer: LoadBalancer | None = Field(
+        default=None,
+        description="Serve the service behind an existing load balancer: agentless creates a serverless NEG and a "
+        "backend service, and routes the hosts (or hosts + pathPrefix) to it in the URL map. Callers still need "
+        "roles/run.invoker; use ingress internal-and-cloud-load-balancing to only serve through the load balancer.",
+    )
     timeout: str = Field(default="300s", pattern=r"^\d+s$", description="Request timeout, at most 3600s.")
     cpu_throttling: bool = Field(default=False, description="Only allocate CPU during requests.")
     session_affinity: bool = True
