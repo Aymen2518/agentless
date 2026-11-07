@@ -162,15 +162,16 @@ class ServiceAccountResource(Resource):
         mine = rf"[a-z][a-z0-9-]*@{re.escape(ctx.project.config.provider.project)}\.iam\.gserviceaccount\.com"
         for email in filter(None, [st.get("previous"), st.get("email") if st.get("created") else None]):
             owned_name(email, mine, "the service account")
-            if email != service_account_email(ctx):  # not the one this config names: it must carry the marker
-                live = ctx.clients.get_service_account(email)
-                if live is None:
-                    continue
-                if (live.get("description") or "") != sa_marker(ctx):
-                    raise RuntimeError(
-                        f"service account {email} was not created by agentless for {ctx.project.config.service}; "
-                        "refusing to delete it"
-                    )
+            # Always the marker, even for the configured email: with `create: false` that one is the user's own
+            # account, and edited state could mark it as created.
+            live = ctx.clients.get_service_account(email)
+            if live is None:
+                continue
+            if (live.get("description") or "") != sa_marker(ctx):
+                raise RuntimeError(
+                    f"service account {email} was not created by agentless for {ctx.project.config.service}; "
+                    "refusing to delete it"
+                )
             ctx.clients.delete_service_account(email)
         self._set_state(ctx, None)
 

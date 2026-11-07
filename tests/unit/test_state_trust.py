@@ -98,3 +98,17 @@ def test_remove_still_deletes_what_this_deployment_created(make_provider, gcp: F
     assert make_provider().remove(lambda _: True)
     assert not gcp.engines
     assert "sample-dev@proj-dev.iam.gserviceaccount.com" not in gcp.service_accounts
+
+
+def test_remove_never_deletes_a_configured_existing_account_state_marks_as_created(make_provider, gcp, edit) -> None:
+    shared = "shared@proj-dev.iam.gserviceaccount.com"
+    gcp.service_accounts[shared] = {"email": shared, "description": "the team's own account"}
+    edit(lambda d: d["identity"].update(serviceAccount={"create": False, "email": shared}))
+    _deploy(make_provider())
+    provider = make_provider()
+    state = provider.store.read()
+    state.resources["serviceAccount"] = {"email": shared, "created": True}  # forged
+    provider.store.write(state)
+    with pytest.raises(RuntimeError, match="not created by agentless"):
+        make_provider().remove(lambda _: True)
+    assert shared in gcp.service_accounts
