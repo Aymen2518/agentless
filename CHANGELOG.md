@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-11-07
+
 ### Security
 - **A secret embedded in a longer value is now redacted.** `${secret:}` values were only masked when they were the
   whole value, so `postgres://app:${secret:pw}@db` showed the password in plan output, `print` and the stored spec.
@@ -281,7 +283,8 @@ First public release: wheel and sdist (`agentless-cli`) on the GitHub Release, a
 - Plugins through pluggy entry points in the `agentless` group.
 - Multi-arch container image and Claude Code skills for developing agentless and deploying agents with it.
 
-[Unreleased]: https://github.com/Aymen2518/agentless/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/Aymen2518/agentless/compare/v0.13.1...HEAD
+[0.13.1]: https://github.com/Aymen2518/agentless/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/Aymen2518/agentless/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/Aymen2518/agentless/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/Aymen2518/agentless/compare/v0.10.1...v0.11.0
