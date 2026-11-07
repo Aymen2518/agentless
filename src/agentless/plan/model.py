@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -117,3 +118,23 @@ class Resource(ABC):
         else:
             ctx.state.resources[self.key] = value
         ctx.save()
+
+
+def owned_name(name: str, pattern: str, what: str) -> str:
+    """`name`, read from state, if it has the shape agentless gives that resource here; raises otherwise.
+
+    State drives what deploy and remove delete and run. A name agentless couldn't have created for this deployment
+    (another project, another kind of resource) means the state was edited: refuse instead of acting on it.
+    """
+    if not re.fullmatch(pattern, name):
+        raise RuntimeError(
+            f"state names {what} {name!r}, which agentless doesn't create for this deployment; refusing to act on "
+            "it. Check who can write the state bucket, and fix or remove that entry of the state"
+        )
+    return name
+
+
+def project_ref(ctx: Context) -> str:
+    """Regex matching the provider project in a resource name: its id or its number."""
+    ids = [ctx.project.config.provider.project, str(ctx.clients.project_number())]
+    return "(?:" + "|".join(re.escape(i) for i in ids) + ")"

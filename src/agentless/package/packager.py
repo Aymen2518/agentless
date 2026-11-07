@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import io
 import os
@@ -28,6 +29,36 @@ _INCLUDE_DIRECTIVE = "#!include:"
 _UNHASHED = frozenset({"deployment_metadata.json"})
 
 
+# Names that usually hold credentials. Packaging stays as agents-cli does it (only ignore files exclude), but these
+# are reported so a forgotten .gcloudignore entry doesn't ship a secret into the bucket and the image.
+_SECRET_NAMES = (
+    ".env",
+    ".env.*",
+    "*.pem",
+    "*.key",
+    "*.p12",
+    "*.pfx",
+    "id_rsa*",
+    "id_ed25519*",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    "credentials.json",
+    "application_default_credentials.json",
+    "*service-account*.json",
+    "*-sa-key*.json",
+)
+_SAMPLE_SUFFIXES = (".example", ".sample", ".template", ".dist")
+
+
+def looks_secret(rel: str) -> bool:
+    """Whether a packaged file's name says it usually holds credentials (samples such as .env.example don't)."""
+    name = rel.rsplit("/", 1)[-1].lower()
+    if name.endswith(_SAMPLE_SUFFIXES):
+        return False
+    return any(fnmatch.fnmatchcase(name, pattern) for pattern in _SECRET_NAMES)
+
+
 class PackageError(Exception):
     """The source tree cannot be deployed."""
 
@@ -39,6 +70,11 @@ class Package:
     root: Path
     files: tuple[str, ...]
     sha256: str
+
+    @property
+    def secret_files(self) -> list[str]:
+        """Packaged files whose name says they usually hold credentials (they're uploaded and built in)."""
+        return [f for f in self.files if looks_secret(f)]
 
     @property
     def source_packages(self) -> list[str]:

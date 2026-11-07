@@ -6,6 +6,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Security
+- **A secret embedded in a longer value is now redacted.** `${secret:}` values were only masked when they were the
+  whole value, so `postgres://app:${secret:pw}@db` showed the password in plan output, `print` and the stored spec.
+  Every string is now masked (secrets of 6+ characters), and `${tf:}` outputs Terraform marks `sensitive` are
+  masked too.
+- **The agent can no longer be given access to agentless state.** `memory.artifactsBucket`, `resources.buckets` and
+  bucket roles in `identity.roles` naming `provider.stagingBucket` are rejected: agentless granted the runtime
+  identity write access to the bucket whose state steers the next deploy and remove. A project-wide storage write
+  role warns. Names read from state are checked before deletes and rollouts (project, naming, agentless marker on
+  NEGs and backend services, the Cloud Run image's repository and digest).
+- Packaging warns about files that usually hold credentials (`.env`, `*.pem`, key files…).
+- GitHub Actions are pinned to commit SHAs, kept current by Dependabot.
+
+### Fixed
+- Changing `cloudRun.artifactRegistry` rebuilds into the new repository and rolls the service out from it.
+
 ## [0.13.0] - 2026-11-06
 
 ### Added

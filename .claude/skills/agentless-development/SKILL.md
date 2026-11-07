@@ -37,9 +37,14 @@ safely.
    (for example `iam` when the principal changes, `geminiEnterprise` when the engine is recreated).
 5. **Deploy and remove hold the lock across plan and apply** (`BaseProvider.deploy` / `remove`). `plan`
    alone is read-only and takes no lock.
-6. **Secrets never reach output or state.** Values resolved through `${secret:}` are collected in
-   `Project.sensitive`. `spec.redact()` hashes them in stored specs and plan diffs. The GE OAuth secret is only ever
-   stored as a hash. `print` masks them.
+6. **Secrets never reach output or state.** Values resolved through `${secret:}` (and sensitive `${tf:}` outputs,
+   via `on_sensitive`) are collected in `Project.sensitive`. `agentless/redaction.py` masks them in every string,
+   also embedded in a longer one (6+ characters): `spec.redact()` in stored specs and plan diffs, `print` with
+   `********`. The GE OAuth secret is only ever stored as a hash.
+12. **State is trusted only for what agentless could have made.** The agent's identity never gets access to
+   `provider.stagingBucket` (schema rejects it; a project-wide storage write role warns). Before deleting or
+   rolling out a name from state, check its shape with `plan.model.owned_name` (`project_ref`, `engine_pattern`),
+   and the agentless marker on Compute resources. New destructive calls on state names must do the same.
 7. **Only the selected stage is resolved.** `Resolver(skip=…)` leaves other `stages.*` untouched, so dev never needs
    prod's env vars.
 8. **Offline commands never authenticate.** `validate`, `print`, `package`, `schema` and `init` must not build GCP

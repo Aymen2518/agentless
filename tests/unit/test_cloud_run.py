@@ -1670,3 +1670,56 @@ def test_compute_calls_retry_while_the_url_map_is_busy(monkeypatch) -> None:
     answers.append(SimpleNamespace(status_code=400, ok=False, text="invalid field", content=b"x"))
     with pytest.raises(RuntimeError, match="invalid field"):
         client.compute_insert("projects/p/global/backendServices", {"name": "x"})
+
+
+# --- edited state never steers a rollout or a delete -------------------------------------------------------------
+
+
+def _tamper(provider, key: str, **fields: object) -> None:
+    state = provider.store.read()
+    state.resources[key] = {**state.resources[key], **fields}
+    provider.store.write(state)
+
+
+def test_a_built_image_state_points_elsewhere_is_never_rolled_out(make_run: Callable, gcp: FakeGcp, edit) -> None:
+    deploy(make_run())
+    _tamper(make_run(), "build", image="docker.io/evil/backdoor:abc123")
+    edit(lambda d: d["agent"]["environment"].update(DEBUG="true"))  # a config change: a new revision
+    deploy(make_run())  # the image is in no repository of this deployment: built again, never rolled out
+    image = gcp.run_services[SERVICE]["template"]["containers"][0]["image"]
+    assert "evil" not in image and image.startswith("europe-west1-docker.pkg.dev/proj-dev/cloud-run-source-deploy/")
+    _tamper(make_run(), "build", digest="sha256:" + "f" * 64, image="docker.io/evil/backdoor:abc123")
+    make_run().deploy(DeployOptions(code_only=True), lambda _: True)  # --code-only too
+    image = gcp.run_services[SERVICE]["template"]["containers"][0]["image"]
+    assert "evil" not in image and "f" * 64 not in image
+
+
+def test_the_image_from_state_is_checked_before_a_rollout(make_run: Callable, edit) -> None:
+    from agentless.providers.cloud_run.resources import ServiceResource
+
+    deploy(make_run())
+    _tamper(make_run(), "build", image="docker.io/evil/backdoor:abc123")
+    provider = make_run()
+    ctx = provider.context(DeployOptions(), None)
+    with pytest.raises(RuntimeError, match="the built image"):
+        ServiceResource._image(ctx)
+
+
+def test_a_changed_artifact_repository_rebuilds_instead_of_reusing_the_old_image(make_run, gcp, edit) -> None:
+    gcp.ar_repositories.add("other-repo")
+    deploy(make_run())
+    edit(lambda d: d.setdefault("cloudRun", {}).update(artifactRegistry="other-repo"))
+    deploy(make_run())
+    image = gcp.run_services[SERVICE]["template"]["containers"][0]["image"]
+    assert "/other-repo/" in image
+
+
+def test_remove_never_deletes_a_backend_service_agentless_did_not_create(make_run, gcp: FakeGcp, edit, lb) -> None:
+    edit(_behind_lb(hosts=["agent.example.com"]))
+    deploy(make_run())
+    foreign = "projects/proj-dev/global/backendServices/payments-lb"
+    gcp.compute[foreign] = {"name": "payments-lb", "description": "owned by the payments team"}
+    _tamper(make_run(), "loadBalancer", backendService=foreign)
+    with pytest.raises(RuntimeError, match="not created by agentless"):
+        make_run().remove(lambda _: True)
+    assert foreign in gcp.compute

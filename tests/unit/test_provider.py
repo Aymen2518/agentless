@@ -478,3 +478,40 @@ def test_partial_remove_keeps_state(make_provider, gcp):
     with pytest.raises(DeployError, match="partial remove"):
         make_provider().remove(YES)
     assert make_provider().store.read().resources["iam"]["bindings"]
+
+
+def test_a_secret_embedded_in_a_longer_value_never_reaches_plan_or_state(make_provider, gcp, edit, monkeypatch):
+    monkeypatch.setattr("agentless.config.sources._access_secret", lambda name, deployer: "s3cr3t-pw")
+    edit(lambda d: d["agent"]["environment"].update(DATABASE_URL="postgres://app:${secret:db-pass}@db/app"))
+    _, cs = make_provider().plan(DeployOptions())
+    first = "\n".join(line for c in cs.changes for line in c.details)
+    deploy(make_provider)
+    edit(lambda d: d["agent"]["environment"].update(DATABASE_URL="postgres://app2:${secret:db-pass}@db/app"))
+    _, cs = make_provider().plan(DeployOptions())
+    text = first + "\n".join(line for c in cs.changes for line in c.details)
+    assert "s3cr3t-pw" not in text
+    assert "postgres://app2:<secret sha256:" in text  # the rest of the value still shows what changed
+    assert "s3cr3t-pw" not in make_provider().store._state.read_text()
+    create = next(c for c in gcp.calls if c[0] == "engine_create")[2]
+    env = {e["name"]: e["value"] for e in create["spec"]["deployment_spec"]["env"]}
+    assert env["DATABASE_URL"] == "postgres://app:s3cr3t-pw@db/app"  # the agent still gets the real value
+
+
+def test_sensitive_terraform_outputs_are_masked_like_secrets(make_provider, gcp, edit, monkeypatch):
+    outputs = {
+        "db_password": {"value": "tf-pa55word", "sensitive": True},
+        "db_host": {"value": "db.internal", "sensitive": False},
+    }
+    monkeypatch.setattr("agentless.config.sources._read_tf_outputs", lambda location, project, deployer: outputs)
+    edit(
+        lambda d: d["agent"]["environment"].update(
+            DB_PASSWORD="${tf(gs://tf-state/net):db_password}", DB_HOST="${tf(gs://tf-state/net):db_host}"
+        )
+    )
+    deploy(make_provider)
+    assert "tf-pa55word" not in make_provider().store._state.read_text()
+    outputs["db_password"]["value"] = "tf-pa55word-rotated"
+    outputs["db_host"]["value"] = "db2.internal"
+    _, cs = make_provider().plan(DeployOptions())
+    text = "\n".join(line for c in cs.changes for line in c.details)
+    assert "tf-pa55word" not in text and "db2.internal" in text

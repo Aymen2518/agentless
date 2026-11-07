@@ -5,11 +5,12 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
+import re
 from collections import defaultdict
 from typing import Any
 
 from agentless.config.schema import BUCKET_ROLES, IdentityType
-from agentless.plan.model import Action, Change, Context, Resource
+from agentless.plan.model import Action, Change, Context, Resource, owned_name, project_ref
 from agentless.providers.agent_runtime import spec as engine_spec
 
 _GE_ICON = "https://fonts.gstatic.com/s/i/short-term/release/googlesymbols/smart_toy/default/24px.svg"
@@ -24,6 +25,11 @@ def service_account_email(ctx: Context) -> str | None:
         return None
     sa = identity.service_account
     return sa.email if not sa.create else f"{sa.name}@{ctx.project.config.provider.project}.iam.gserviceaccount.com"
+
+
+def engine_pattern(ctx: Context) -> str:
+    """Shape of a reasoning engine agentless creates in the provider project (any region: a move keeps the old one)."""
+    return rf"projects/{project_ref(ctx)}/locations/[a-z0-9-]+/reasoningEngines/[0-9]+"
 
 
 def agent_principal(identity: str | None) -> str | None:
@@ -128,8 +134,9 @@ class ServiceAccountResource(Resource):
 
     def destroy(self, ctx: Context) -> None:  # noqa: D102
         st = self._state(ctx)
+        mine = rf"[a-z][a-z0-9-]*@{re.escape(ctx.project.config.provider.project)}\.iam\.gserviceaccount\.com"
         for email in filter(None, [st.get("previous"), st.get("email") if st.get("created") else None]):
-            ctx.clients.delete_service_account(email)
+            ctx.clients.delete_service_account(owned_name(email, mine, "the service account"))
         self._set_state(ctx, None)
 
 
@@ -780,9 +787,9 @@ class EngineResource(Resource):
     def destroy(self, ctx: Context) -> None:  # noqa: D102
         st = self._state(ctx)
         if st.get("previous"):
-            ctx.clients.engine_delete(st["previous"])
+            ctx.clients.engine_delete(owned_name(st["previous"], engine_pattern(ctx), "the engine"))
         if st.get("name") and st.get("created"):
-            ctx.clients.engine_delete(st["name"])
+            ctx.clients.engine_delete(owned_name(st["name"], engine_pattern(ctx), "the engine"))
         self._set_state(ctx, None)
 
 

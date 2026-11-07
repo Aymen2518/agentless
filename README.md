@@ -465,8 +465,18 @@ needs prod's environment variables.
   also manages.
 - An engine already deployed by `agents-cli` with the same display name is **adopted** on the first deploy (an
   update, not a duplicate), and is owned from then on.
-- Values from `${secret:}` used in `environment` or `build.args` are redacted in plan output and stored in state as
-  a short hash. Prefer `agent.secrets`, which keeps the value in Secret Manager entirely.
+- Values from `${secret:}`, and `${tf:}` outputs Terraform marks `sensitive`, are redacted in plan output, `print`
+  and state as a short hash, also when embedded in a longer value (`postgres://app:${secret:pw}@db`; secrets of 6+
+  characters). They still reach the agent as plain env vars: prefer `agent.secrets`, which keeps the value in
+  Secret Manager entirely.
+- **The agent never gets access to the state bucket.** Every deploy and remove trusts what state records, so
+  `memory.artifactsBucket`, `resources.buckets` and bucket roles in `identity.roles` can't name
+  `provider.stagingBucket`, and a project-wide storage write role in `identity.roles.project` prints a warning. Names
+  read from state are also checked before use: a service account, engine, service, image, NEG or backend service
+  agentless couldn't have created for this deployment (another project, no agentless marker) is refused, never
+  deleted or rolled out.
+- Packaging warns about files that usually hold credentials (`.env`, `*.pem`, key files…): they're uploaded and
+  built into the agent unless `.gcloudignore` (or `.gitignore` when there is none) excludes them.
 - State is saved after each resource, and after each IAM target. A failed `remove` keeps state for what's left, so
   rerunning finishes the job.
 - Online monitors run as the project's Agent Platform service agent. Anyone who can create online evaluators can

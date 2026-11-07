@@ -15,6 +15,7 @@ from agentless.compat.agents_cli import Manifest, read_manifest
 from agentless.config.schema import AgentConfig, DeployerConfig
 from agentless.config.sources import build_sources
 from agentless.config.variables import Missing, Resolver, SourceFn, VariableError
+from agentless.redaction import remember
 
 DEFAULT_CONFIG_FILE = "agent.yaml"
 
@@ -86,7 +87,14 @@ def load_project(
     sensitive: set[str] = set()
 
     def make_resolver(selected: str, deployer: Deployer | None = None, *, offline: bool = False) -> Resolver:
-        sources = build_sources(root=root, stage=selected, options=options, params=params, deployer=deployer)
+        sources = build_sources(
+            root=root,
+            stage=selected,
+            options=options,
+            params=params,
+            deployer=deployer,
+            on_sensitive=lambda value: remember(value, sensitive),
+        )
         sources.update(extra_sources or {})
         if offline:
             # The deployer is chosen before anything authenticates, so it can't depend on GCP reads.
@@ -95,7 +103,7 @@ def load_project(
 
         def tracked_secret(ctx: Any, arg: str | None, key: str) -> Any:
             value = secret(ctx, arg, key)
-            sensitive.add(str(value))
+            remember(value, sensitive)
             return value
 
         sources["secret"] = tracked_secret
