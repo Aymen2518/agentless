@@ -1723,3 +1723,16 @@ def test_remove_never_deletes_a_backend_service_agentless_did_not_create(make_ru
     with pytest.raises(RuntimeError, match="not created by agentless"):
         make_run().remove(lambda _: True)
     assert foreign in gcp.compute
+
+
+def test_remove_refuses_another_agents_cloud_run_service(make_run: Callable, gcp: FakeGcp) -> None:
+    deploy(make_run())
+    other = "projects/proj-dev/locations/europe-west1/services/billing-agent-dev"
+    gcp.run_services[other] = {
+        "labels": {"agentless-service": "billing-agent", "agentless-stage": "dev"},
+        "template": {"containers": [{"image": "x@sha256:1"}]},
+    }
+    _tamper(make_run(), "service", name=other)
+    with pytest.raises(RuntimeError, match="not labelled as sample-agent/dev"):
+        make_run().remove(lambda _: True)
+    assert other in gcp.run_services

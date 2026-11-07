@@ -44,7 +44,10 @@ safely.
 12. **State is trusted only for what agentless could have made.** The agent's identity never gets access to
    `provider.stagingBucket` (schema rejects it; a project-wide storage write role warns). Before deleting or
    rolling out a name from state, check its shape with `plan.model.owned_name` (`project_ref`, `engine_pattern`),
-   and the agentless marker on Compute resources. New destructive calls on state names must do the same.
+   then that the live resource is this deployment's: `agentless-service`/`agentless-stage` labels
+   (`delete_owned_engine`, Cloud Run services), `sa_marker` on service accounts, the marker on Compute resources.
+   A shape check alone still lets edited state name another agent of the same project. New destructive calls on
+   state names must do the same.
 7. **Only the selected stage is resolved.** `Resolver(skip=…)` leaves other `stages.*` untouched, so dev never needs
    prod's env vars.
 8. **Offline commands never authenticate.** `validate`, `print`, `package`, `schema` and `init` must not build GCP

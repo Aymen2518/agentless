@@ -53,7 +53,7 @@ class FakeGcp:
     def create_service_account(self, account_id: str, display_name: str, description: str) -> str:
         email = f"{account_id}@{self.project}.iam.gserviceaccount.com"
         self.calls.append(("create_sa", email))
-        self.service_accounts[email] = {"email": email, "display_name": display_name}
+        self.service_accounts[email] = {"email": email, "display_name": display_name, "description": description}
         return email
 
     def update_service_account_display_name(self, email: str, display_name: str) -> None:
@@ -150,6 +150,7 @@ class FakeGcp:
             else {
                 "name": name,
                 "display_name": e["display_name"],
+                "labels": dict(e.get("labels") or {}),
                 "effective_identity": e.get("effective_identity"),
                 "service_account": None,
             }
@@ -173,7 +174,7 @@ class FakeGcp:
 
     def engine_create(self, config: dict[str, Any]) -> str:
         name = f"projects/123456/locations/{self.region}/reasoningEngines/{next(self._ids)}"
-        self.engines[name] = {"display_name": config["display_name"], "config": config}
+        self.engines[name] = {"display_name": config["display_name"], "config": config, "labels": config.get("labels")}
         if config.get("spec", {}).get("identity_type") == "AGENT_IDENTITY":
             self.engines[name]["effective_identity"] = f"agents.global.org-1.system.id.goog/resources/aiplatform/{name}"
         elif config.get("spec", {}).get("service_account"):
@@ -188,7 +189,7 @@ class FakeGcp:
     ) -> dict[str, Any]:
         name = f"projects/123456/locations/{self.region}/reasoningEngines/{next(self._ids)}"
         identity = f"agents.global.org-1.system.id.goog/resources/aiplatform/{name}"
-        self.engines[name] = {"display_name": display_name, "effective_identity": identity}
+        self.engines[name] = {"display_name": display_name, "effective_identity": identity, "labels": dict(labels)}
         self.calls.append(("engine_create_identity", name, encryption_spec))
         return {"name": name, "effective_identity": identity}
 
@@ -197,6 +198,8 @@ class FakeGcp:
             raise RuntimeError(f"404 engine {name} not found")
         if "encryption_spec" in config.get("update_mask", "").split(","):
             raise RuntimeError("400 INVALID_ARGUMENT: Cannot update encryption_spec in ReasoningEngine.")
+        if "labels" in config.get("update_mask", "").split(","):
+            self.engines[name]["labels"] = config.get("labels")
         self.calls.append(("engine_update", name, config))
         return self._op(name)
 

@@ -24,7 +24,7 @@ from agentless.providers.agent_runtime.resources import (
     GeminiEnterpriseResource,
     IamResource,
     ServiceAccountResource,
-    engine_pattern,
+    delete_owned_engine,
     is_a2a,
     service_account_email,
 )
@@ -139,7 +139,8 @@ class SessionEngineResource(Resource):
     def destroy(self, ctx: Context) -> None:  # noqa: D102
         st = self._state(ctx)
         if st:
-            ctx.clients.engine_delete(owned_name(st["name"], engine_pattern(ctx), "the sessions engine"))
+            display = SessionEngineResource._desired(ctx)["display_name"]
+            delete_owned_engine(ctx, st["name"], {display}, "the sessions engine")
         self._set_state(ctx, None)
 
     def cleanup(self, ctx: Context, change: Change) -> None:  # noqa: D102
@@ -486,7 +487,18 @@ class ServiceResource(Resource):
         st = self._state(ctx)
         if st:
             pattern = rf"projects/{project_ref(ctx)}/locations/[a-z0-9-]+/services/[a-z][a-z0-9-]*"
-            ctx.clients.run_service_delete(owned_name(st["name"], pattern, "the Cloud Run service"))
+            owned_name(st["name"], pattern, "the Cloud Run service")
+            live = ctx.clients.run_service_get(st["name"])
+            if live is not None:
+                labels, cfg = live.get("labels") or {}, ctx.project.config
+                if (
+                    labels.get("agentless-service") != cfg.service
+                    or labels.get("agentless-stage") != cfg.provider.stage
+                ):
+                    raise RuntimeError(
+                        f"{st['name']} is not labelled as {cfg.service}/{cfg.provider.stage}'s; refusing to delete it"
+                    )
+                ctx.clients.run_service_delete(st["name"])
         self._set_state(ctx, None)
 
 

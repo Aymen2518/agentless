@@ -14,8 +14,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - **The agent can no longer be given access to agentless state.** `memory.artifactsBucket`, `resources.buckets` and
   bucket roles in `identity.roles` naming `provider.stagingBucket` are rejected: agentless granted the runtime
   identity write access to the bucket whose state steers the next deploy and remove. A project-wide storage write
-  role warns. Names read from state are checked before deletes and rollouts (project, naming, agentless marker on
-  NEGs and backend services, the Cloud Run image's repository and digest).
+  role warns. Names read from state are checked before deletes and rollouts: project and naming, then the live
+  resource must be this deployment's (agentless labels on engines and Cloud Run services, the description of
+  service accounts, the marker on NEGs and backend services), and the Cloud Run image must come from its own
+  repository.
 - Packaging warns about files that usually hold credentials (`.env`, `*.pem`, key files…).
 - GitHub Actions are pinned to commit SHAs, kept current by Dependabot.
 
