@@ -1,0 +1,10 @@
+# Actions are pinned to commit SHAs (a moved tag can't change what the release jobs run); this keeps the pins current.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
