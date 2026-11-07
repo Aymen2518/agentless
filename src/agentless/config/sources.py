@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 import json
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +16,13 @@ from agentless.config.variables import Missing, SourceContext, SourceFn, Variabl
 
 
 def build_sources(
-    *, root: Path, stage: str, options: dict[str, Any], params: dict[str, Any], deployer: Deployer | None = None
+    *,
+    root: Path,
+    stage: str,
+    options: dict[str, Any],
+    params: dict[str, Any],
+    deployer: Deployer | None = None,
+    on_sensitive: Callable[[Any], None] | None = None,
 ) -> dict[str, SourceFn]:
     """Return the built-in source table for one load.
 
@@ -25,6 +32,8 @@ def build_sources(
         options: CLI options exposed through `${opt:...}`.
         params: CLI `--param` overrides, highest priority for `${param:...}`.
         deployer: Identity used to read `${secret:}` and `${tf:}`.
+        on_sensitive: Called with each `${tf:}` output Terraform marks sensitive, so it's masked like a secret
+            (`${secret:}` values are tracked by the loader, which also covers a plugin's secret source).
     """
     deployer = deployer or Deployer()
 
@@ -75,6 +84,8 @@ def build_sources(
         outputs = _read_tf_outputs(arg, _project_or_none(ctx), deployer)
         if key not in outputs:
             raise Missing(f"output {key!r} not in {arg}")
+        if outputs[key].get("sensitive") and on_sensitive:
+            on_sensitive(outputs[key]["value"])
         return outputs[key]["value"]
 
     return {

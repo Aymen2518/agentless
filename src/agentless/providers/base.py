@@ -79,6 +79,12 @@ class BaseProvider:
         except ValueError:
             pass
         package = collect(self.project.source_dir, tuple(excluded))
+        if package.secret_files:
+            self.echo(
+                f"⚠ packaging {', '.join(package.secret_files)}, which usually hold credentials: they are uploaded "
+                "and built into the agent. Add them to .gcloudignore (or .gitignore when there is none) unless "
+                "they're meant to ship"
+            )
         self.hooks.hook.agentless_after_package(project=self.project, package=package)
         return package
 

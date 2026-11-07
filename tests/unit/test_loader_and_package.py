@@ -132,3 +132,25 @@ def test_ignored_dockerfile_fails(agent_dir):
 def test_other_stages_are_not_resolved(agent_dir, edit):
     edit(lambda d: d["stages"]["prod"]["params"].update(project="${env:DOES_NOT_EXIST_123}"))
     assert load_project(agent_dir / "agent.yaml", stage="dev").config.provider.project == "proj-dev"
+
+
+def test_files_that_usually_hold_credentials_are_reported(tmp_path) -> None:
+    from agentless.package.packager import collect, looks_secret
+
+    (tmp_path / "Dockerfile").write_text("FROM x\n")
+    (tmp_path / "app").mkdir()
+    for name in (".env", "app/.env.prod", "app/server.pem", "app/sa-key.json", ".env.example", "app/main.py"):
+        (tmp_path / name).write_text("x")
+    package = collect(tmp_path)
+    assert package.secret_files == [".env", "app/.env.prod", "app/server.pem"]
+    assert looks_secret("deploy/my-service-account.json") and looks_secret("x/prod-sa-key-1.json")
+    assert not looks_secret(".env.sample") and not looks_secret("README.md")
+
+
+def test_deploy_warns_before_uploading_a_credentials_file(make_provider, agent_dir) -> None:
+    (agent_dir / ".env").write_text("API_KEY=x\n")
+    lines: list[str] = []
+    provider = make_provider()
+    provider.echo = lines.append
+    provider.package()
+    assert any(".env, which usually hold credentials" in line for line in lines)

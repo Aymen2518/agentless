@@ -476,6 +476,18 @@ class OrganizationRoles(_Model):
     roles: list[str]
 
 
+# Project-level roles that can create or overwrite objects in every bucket of the project.
+_PROJECT_STORAGE_WRITERS = frozenset(
+    {
+        "roles/owner",
+        "roles/editor",
+        "roles/storage.admin",
+        "roles/storage.objectAdmin",
+        "roles/storage.objectCreator",
+        "roles/storage.objectUser",
+    }
+)
+
 ResourceType = Literal["project", "folder", "organization", "bucket", "secret", "serviceAccount", "bigqueryDataset"]
 
 
@@ -809,6 +821,33 @@ class AgentConfig(_Model):
     custom: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
+    def _state_bucket_stays_private(self) -> AgentConfig:
+        """The agent must never get access to the bucket holding agentless state.
+
+        Every deploy and remove trusts the names recorded there (what to delete, which bindings are agentless's
+        to revoke, which image to run): an agent able to rewrite it would steer the deployer's next run.
+        """
+        state = self.provider.staging_bucket
+        if not state:
+            return self
+        granted = [
+            ("memory.artifactsBucket", (self.memory.artifacts_bucket or "").removeprefix("gs://")),
+            *((f"resources.buckets.{key}", bucket.name) for key, bucket in self.resources.buckets.items()),
+            *(
+                (f"identity.roles.resources ({r.type} {r.name})", r.name.removeprefix("gs://"))
+                for r in self.identity.roles.resources
+                if r.type == "bucket"
+            ),
+        ]
+        clashes = [where for where, name in granted if name == state]
+        if clashes:
+            raise ValueError(
+                f"{', '.join(clashes)} names provider.stagingBucket ({state}), which holds agentless state: the agent "
+                "would be able to rewrite it and steer the next deploy or remove. Use another bucket for the agent"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _bucket_env(self) -> AgentConfig:
         for key, bucket in self.resources.buckets.items():
             if bucket.env and bucket.env in self.agent.environment:
@@ -896,6 +935,18 @@ class AgentConfig(_Model):
         """Cloud Run service name, unique per service and stage."""
         name = (self.cloud_run.service_name if self.cloud_run else None) or f"{self.service}-{self.provider.stage}"
         return name[:49].rstrip("-")
+
+    def warnings(self) -> list[str]:
+        """Deprecations, plus settings that work but weaken a safety rule."""
+        out = self.deprecations()
+        writers = sorted(set(self.identity.roles.project) & _PROJECT_STORAGE_WRITERS)
+        if writers and self.provider.staging_bucket:
+            out.append(
+                f"identity.roles.project grants {', '.join(writers)}: the agent can write every bucket of the project, "
+                f"including {self.provider.staging_bucket}, which holds agentless state. Grant storage roles on the "
+                "agent's own buckets instead (resources.buckets or identity.roles.resources)"
+            )
+        return out
 
     def deprecations(self) -> list[str]:
         """Settings that still work but should be migrated."""

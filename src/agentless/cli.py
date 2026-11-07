@@ -128,7 +128,7 @@ def _load(
         impersonate=impersonate,
     )
     pm.hook.agentless_after_load(project=project)
-    for message in project.config.deprecations():
+    for message in project.config.warnings():
         typer.secho(f"⚠ {message}", fg=typer.colors.YELLOW, err=True)
     return project, pm
 
@@ -223,14 +223,10 @@ def print_(
     """Print agent.yaml with every variable resolved; secret values are masked."""
     project, _ = _load(config, stage, param, impersonate)
 
-    def mask(node: Any) -> Any:
-        if isinstance(node, dict):
-            return {k: mask(v) for k, v in node.items()}
-        if isinstance(node, list):
-            return [mask(v) for v in node]
-        return "********" if isinstance(node, str) and node in project.sensitive else node
+    from agentless.redaction import mask_tree
 
-    typer.echo(yaml.safe_dump(mask(project.resolved), sort_keys=False))
+    masked = mask_tree(project.resolved, project.sensitive, lambda _: "********")
+    typer.echo(yaml.safe_dump(masked, sort_keys=False))
 
 
 @app.command()

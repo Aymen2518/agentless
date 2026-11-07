@@ -100,3 +100,21 @@ def test_sdk_packaging_value_error_becomes_a_clean_failure(tmp_path):
     clients.__dict__["_vertex"] = SimpleNamespace(agent_engines=SimpleNamespace(_create_config=refuse))
     with pytest.raises(RuntimeError, match="packaging the agent source failed: File path './x'"):
         clients.engine_code_spec(tmp_path, ["./x"], {}, "google-adk")
+
+
+def test_print_masks_a_secret_embedded_in_a_longer_value(agent_dir, monkeypatch):
+    monkeypatch.setattr("agentless.config.sources._access_secret", lambda name, deployer: "hunter22")
+    path = agent_dir / "agent.yaml"
+    path.write_text(path.read_text() + "custom: { url: 'https://u:${secret:pw}@host/x' }\n")
+    result = runner.invoke(cli.app, ["print", "-c", str(path)])
+    assert result.exit_code == 0 and "hunter22" not in result.output
+    assert "https://u:********@host/x" in result.output
+
+
+def test_masking_rules() -> None:
+    from agentless.redaction import mask_text
+
+    sensitive = frozenset({"abc", "longsecret", "longsecret-extended"})
+    assert mask_text("abc", sensitive, lambda _: "*") == "*"  # a short secret: only as the whole value
+    assert mask_text("xabcx", sensitive, lambda _: "*") == "xabcx"
+    assert mask_text("a=longsecret-extended;b=longsecret", sensitive, lambda _: "*") == "a=*;b=*"  # longest first

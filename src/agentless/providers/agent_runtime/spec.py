@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import hashlib
 import tomllib
 from typing import Any
 
 from agentless.config.loader import Project
 from agentless.config.schema import IdentityType
+from agentless.redaction import mask_tree
 
 # Fields whose change cannot be applied in place.
 IMMUTABLE_FIELDS = ("psc_interface_config", "encryption_spec", "identity_type")
@@ -265,15 +265,8 @@ def api_payload(spec: dict[str, Any], fields: list[str] | None = None) -> tuple[
 
 
 def redact(spec: dict[str, Any], sensitive: frozenset[str]) -> dict[str, Any]:
-    """Copy of the spec safe to print and store: values that came from ${secret:} become a short hash."""
-    if not sensitive:
-        return spec
+    """Copy of the spec safe to print and store: secret values become a short hash, wherever they appear.
 
-    def mask(value: str) -> str:
-        return f"<secret sha256:{hashlib.sha256(value.encode()).hexdigest()[:12]}>" if value in sensitive else value
-
-    out = dict(spec)
-    for name in ("env", "build_args"):
-        if name in spec:
-            out[name] = {k: mask(v) for k, v in spec[name].items()}
-    return out
+    A secret embedded in a longer value (`postgres://u:${secret:pw}@h`) is masked inside it, in every field.
+    """
+    return mask_tree(spec, sensitive)

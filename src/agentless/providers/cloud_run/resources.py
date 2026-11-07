@@ -8,12 +8,13 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import re
 import tempfile
 from pathlib import Path
 from typing import Any
 
 from agentless.package.packager import write_archive
-from agentless.plan.model import Action, Change, Context, Resource
+from agentless.plan.model import Action, Change, Context, Resource, owned_name, project_ref
 from agentless.providers.agent_runtime import spec as engine_spec
 from agentless.providers.agent_runtime.resources import (
     _CARD_CONSUMERS,
@@ -23,6 +24,7 @@ from agentless.providers.agent_runtime.resources import (
     GeminiEnterpriseResource,
     IamResource,
     ServiceAccountResource,
+    engine_pattern,
     is_a2a,
     service_account_email,
 )
@@ -137,7 +139,7 @@ class SessionEngineResource(Resource):
     def destroy(self, ctx: Context) -> None:  # noqa: D102
         st = self._state(ctx)
         if st:
-            ctx.clients.engine_delete(st["name"])
+            ctx.clients.engine_delete(owned_name(st["name"], engine_pattern(ctx), "the sessions engine"))
         self._set_state(ctx, None)
 
     def cleanup(self, ctx: Context, change: Change) -> None:  # noqa: D102
@@ -184,7 +186,8 @@ class BuildResource(Resource):
         run = ctx.project.config.cloud_run
         assert run is not None
         repo = run.artifact_registry
-        if st and not ctx.options.force and all(st.get(k) == v for k, v in fingerprint.items()):
+        same_repository = (st.get("image") or "").rpartition(":")[0] == image.rpartition(":")[0]
+        if st and same_repository and not ctx.options.force and all(st.get(k) == v for k, v in fingerprint.items()):
             return Change(self.key, Action.NOOP, st["image"])
         details = ["+ source changed" if st else "+ first build"]
         if st and st.get("buildArgs") != fingerprint["buildArgs"]:
@@ -271,7 +274,11 @@ class ServiceResource(Resource):
         build = ctx.state.resources.get("build") or {}
         if not build.get("digest"):
             return None
-        return f"{build['image'].rpartition(':')[0]}@{build['digest']}"
+        # Only ever an image agentless pushed to this deployment's own repository, never one state points elsewhere.
+        repository = re.escape(run_spec.image_uri(ctx.project, "tag").rpartition(":")[0])
+        image = owned_name(build.get("image", ""), rf"{repository}:[0-9a-f]+", "the built image")
+        digest = owned_name(build["digest"], r"sha256:[0-9a-f]{64}", "the image digest")
+        return f"{image.rpartition(':')[0]}@{digest}"
 
     @staticmethod
     def _notes(ctx: Context) -> list[str]:
@@ -334,7 +341,9 @@ class ServiceResource(Resource):
         run = ctx.project.config.cloud_run
         if run and run.image:
             return st.get("image") != run.image
-        return st.get("build") != BuildResource.tag(ctx) or bool(ctx.options.force)
+        repository = run_spec.image_uri(ctx.project, "tag").rpartition(":")[0]
+        moved = (st.get("image") or "").partition("@")[0] != repository  # cloudRun.artifactRegistry changed
+        return st.get("build") != BuildResource.tag(ctx) or moved or bool(ctx.options.force)
 
     def plan(self, ctx: Context) -> Change:  # noqa: D102
         name = run_spec.service_name(ctx.project)
@@ -476,7 +485,8 @@ class ServiceResource(Resource):
     def destroy(self, ctx: Context) -> None:  # noqa: D102
         st = self._state(ctx)
         if st:
-            ctx.clients.run_service_delete(st["name"])
+            pattern = rf"projects/{project_ref(ctx)}/locations/[a-z0-9-]+/services/[a-z][a-z0-9-]*"
+            ctx.clients.run_service_delete(owned_name(st["name"], pattern, "the Cloud Run service"))
         self._set_state(ctx, None)
 
 
@@ -711,8 +721,7 @@ class LoadBalancerResource(Resource):
             self._set_state(ctx, st)
         for key, paths in (("backendService", todo["deleteBackends"]), ("neg", todo["deleteNegs"])):
             for resource in paths:  # backend services first: they hold the NEG
-                ctx.clients.compute_delete(resource)
-                ctx.echo(f"    deleted {resource}")
+                self._delete_owned(ctx, key, resource)
                 if st.get(key) == resource:
                     st.pop(key)
                     if key == "backendService":
@@ -757,11 +766,40 @@ class LoadBalancerResource(Resource):
     def _detach(self, ctx: Context, st: dict[str, Any]) -> None:
         """Strip the agent's entries from the URL map named in state (a URL map deleted since is fine)."""
         url_map = st.get("urlMap")
-        if not url_map or ctx.clients.compute_get(url_map) is None:
+        if not url_map:
             return
-        route = self._owned_route(st.get("matcher", ""), st.get("backendService", ""))
+        owned_name(url_map, self._pattern(ctx, "urlMap"), "the URL map")
+        if ctx.clients.compute_get(url_map) is None:
+            return
+        matcher = owned_name(st.get("matcher", ""), rf"{routing.MATCHER_PREFIX}[a-z0-9-]+", "the path matcher")
+        backend = st.get("backendService", "")
+        route = self._owned_route(
+            matcher, backend and owned_name(backend, self._pattern(ctx, "backendService"), "the backend service")
+        )
         if ctx.clients.url_map_edit(url_map, lambda m: routing.strip(m, route)):
             ctx.echo(f"    removed routes from {url_map}")
+
+    @staticmethod
+    def _pattern(ctx: Context, key: str) -> str:
+        """Shape of the NEG, backend service or URL map paths agentless records for this deployment."""
+        scope = r"(?:global|regions/[a-z0-9-]+)"
+        project = f"projects/{project_ref(ctx)}"
+        return {
+            "neg": rf"{project}/regions/[a-z0-9-]+/networkEndpointGroups/[a-z][-a-z0-9]*-neg",
+            "backendService": rf"{project}/{scope}/backendServices/[a-z][-a-z0-9]*-lb",
+            "urlMap": rf"{project}/{scope}/urlMaps/[a-z][-a-z0-9]*",
+        }[key]
+
+    def _delete_owned(self, ctx: Context, key: str, path: str) -> None:
+        """Delete a NEG or backend service agentless created; one without its marker is never deleted."""
+        owned_name(path, self._pattern(ctx, key), "the NEG" if key == "neg" else "the backend service")
+        live = ctx.clients.compute_get(path)
+        if live is None:
+            return
+        if live.get("description") != self._marker(ctx):
+            raise RuntimeError(f"{path} was not created by agentless for this agent; refusing to delete it")
+        ctx.clients.compute_delete(path)
+        ctx.echo(f"    deleted {path}")
 
     def plan_destroy(self, ctx: Context) -> Change:  # noqa: D102
         st = self._state(ctx)
@@ -778,7 +816,7 @@ class LoadBalancerResource(Resource):
         self._set_state(ctx, st)
         for key in ("backendService", "neg"):  # the backend service holds the NEG
             if st.get(key):
-                ctx.clients.compute_delete(st[key])
+                self._delete_owned(ctx, key, st[key])
                 st.pop(key)
                 self._set_state(ctx, st)
         self._set_state(ctx, None)
