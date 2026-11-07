@@ -27,6 +27,33 @@ def service_account_email(ctx: Context) -> str | None:
     return sa.email if not sa.create else f"{sa.name}@{ctx.project.config.provider.project}.iam.gserviceaccount.com"
 
 
+def sa_marker(ctx: Context) -> str:
+    """Description agentless gives the service accounts it creates."""
+    return f"Managed by agentless for {ctx.project.config.service}"
+
+
+def delete_owned_engine(ctx: Context, name: str, display_names: set[str], what: str) -> None:
+    """Delete an engine named in state, only if it is this deployment's; a missing one is skipped.
+
+    Its agentless labels must name this service and stage (an engine from before labels: its display name).
+    """
+    owned_name(name, engine_pattern(ctx), what)
+    live = ctx.clients.engine_get(name)
+    if live is None:
+        return
+    cfg = ctx.project.config
+    labels = live.get("labels") or {}
+    if labels.get("agentless-service") or labels.get("agentless-stage"):
+        mine = labels.get("agentless-service") == cfg.service and labels.get("agentless-stage") == cfg.provider.stage
+    else:
+        mine = live.get("display_name") in display_names
+    if not mine:
+        raise RuntimeError(
+            f"{what} {name} is not labelled as {cfg.service}/{cfg.provider.stage}'s; refusing to delete it"
+        )
+    ctx.clients.engine_delete(name)
+
+
 def engine_pattern(ctx: Context) -> str:
     """Shape of a reasoning engine agentless creates in the provider project (any region: a move keeps the old one)."""
     return rf"projects/{project_ref(ctx)}/locations/[a-z0-9-]+/reasoningEngines/[0-9]+"
@@ -101,9 +128,7 @@ class ServiceAccountResource(Resource):
         live = ctx.clients.get_service_account(desired["email"])
         if live is None and desired["create"]:
             account_id = desired["email"].split("@")[0]
-            ctx.clients.create_service_account(
-                account_id, desired["display_name"], f"Managed by agentless for {ctx.project.config.service}"
-            )
+            ctx.clients.create_service_account(account_id, desired["display_name"], sa_marker(ctx))
             created = True
         elif live and created and live["display_name"] != desired["display_name"]:
             ctx.clients.update_service_account_display_name(desired["email"], desired["display_name"])
@@ -136,7 +161,18 @@ class ServiceAccountResource(Resource):
         st = self._state(ctx)
         mine = rf"[a-z][a-z0-9-]*@{re.escape(ctx.project.config.provider.project)}\.iam\.gserviceaccount\.com"
         for email in filter(None, [st.get("previous"), st.get("email") if st.get("created") else None]):
-            ctx.clients.delete_service_account(owned_name(email, mine, "the service account"))
+            owned_name(email, mine, "the service account")
+            # Always the marker, even for the configured email: with `create: false` that one is the user's own
+            # account, and edited state could mark it as created.
+            live = ctx.clients.get_service_account(email)
+            if live is None:
+                continue
+            if (live.get("description") or "") != sa_marker(ctx):
+                raise RuntimeError(
+                    f"service account {email} was not created by agentless for {ctx.project.config.service}; "
+                    "refusing to delete it"
+                )
+            ctx.clients.delete_service_account(email)
         self._set_state(ctx, None)
 
 
@@ -787,9 +823,9 @@ class EngineResource(Resource):
     def destroy(self, ctx: Context) -> None:  # noqa: D102
         st = self._state(ctx)
         if st.get("previous"):
-            ctx.clients.engine_delete(owned_name(st["previous"], engine_pattern(ctx), "the engine"))
+            delete_owned_engine(ctx, st["previous"], {ctx.project.config.display_name}, "the engine")
         if st.get("name") and st.get("created"):
-            ctx.clients.engine_delete(owned_name(st["name"], engine_pattern(ctx), "the engine"))
+            delete_owned_engine(ctx, st["name"], {ctx.project.config.display_name}, "the engine")
         self._set_state(ctx, None)
 
 

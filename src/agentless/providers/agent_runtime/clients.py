@@ -58,7 +58,12 @@ class GcpClients:
             sa = self._iam_admin.get_service_account(name=_sa_resource(email))
         except exceptions.NotFound:
             return None
-        return {"email": sa.email, "display_name": sa.display_name, "unique_id": sa.unique_id}
+        return {
+            "email": sa.email,
+            "display_name": sa.display_name,
+            "description": sa.description,
+            "unique_id": sa.unique_id,
+        }
 
     def create_service_account(self, account_id: str, display_name: str, description: str) -> str:
         """Create a service account and return its email."""
@@ -284,6 +289,7 @@ class GcpClients:
         return {
             "name": resource.name,
             "display_name": resource.display_name,
+            "labels": dict(getattr(resource, "labels", None) or {}),
             "effective_identity": getattr(spec, "effective_identity", None) if spec else None,
             "service_account": getattr(spec, "service_account", None) if spec else None,
         }

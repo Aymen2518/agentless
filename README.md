@@ -473,8 +473,8 @@ needs prod's environment variables.
   `memory.artifactsBucket`, `resources.buckets` and bucket roles in `identity.roles` can't name
   `provider.stagingBucket`, and a project-wide storage write role in `identity.roles.project` prints a warning. Names
   read from state are also checked before use: a service account, engine, service, image, NEG or backend service
-  agentless couldn't have created for this deployment (another project, no agentless marker) is refused, never
-  deleted or rolled out.
+  that isn't this deployment's (another project, or another agent's: its agentless labels, description or marker
+  say so) is refused, never deleted or rolled out.
 - Packaging warns about files that usually hold credentials (`.env`, `*.pem`, key files…): they're uploaded and
   built into the agent unless `.gcloudignore` (or `.gitignore` when there is none) excludes them.
 - State is saved after each resource, and after each IAM target. A failed `remove` keeps state for what's left, so

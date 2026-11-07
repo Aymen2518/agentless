@@ -68,3 +68,47 @@ def test_remove_refuses_an_engine_of_another_project(make_provider: Callable, gc
     with pytest.raises(RuntimeError, match="refusing to act on it"):
         make_provider().remove(lambda _: True)
     assert other in gcp.engines
+
+
+def test_remove_refuses_another_agents_service_account_in_the_same_project(make_provider, gcp: FakeGcp) -> None:
+    _deploy(make_provider())
+    other = "billing-agent@proj-dev.iam.gserviceaccount.com"
+    gcp.service_accounts[other] = {"email": other, "description": "Managed by agentless for billing-agent"}
+    _tamper(make_provider(), "serviceAccount", email=other)
+    with pytest.raises(RuntimeError, match="not created by agentless for sample-agent"):
+        make_provider().remove(lambda _: True)
+    assert other in gcp.service_accounts
+
+
+def test_remove_refuses_another_agents_engine_in_the_same_project(make_provider, gcp: FakeGcp) -> None:
+    _deploy(make_provider())
+    other = "projects/123456/locations/europe-west1/reasoningEngines/777"
+    gcp.engines[other] = {
+        "display_name": "billing-agent-dev",
+        "labels": {"agentless-service": "billing-agent", "agentless-stage": "dev"},
+    }
+    _tamper(make_provider(), "engine", name=other)
+    with pytest.raises(RuntimeError, match="not labelled as sample-agent/dev"):
+        make_provider().remove(lambda _: True)
+    assert other in gcp.engines
+
+
+def test_remove_still_deletes_what_this_deployment_created(make_provider, gcp: FakeGcp) -> None:
+    _deploy(make_provider())
+    assert make_provider().remove(lambda _: True)
+    assert not gcp.engines
+    assert "sample-dev@proj-dev.iam.gserviceaccount.com" not in gcp.service_accounts
+
+
+def test_remove_never_deletes_a_configured_existing_account_state_marks_as_created(make_provider, gcp, edit) -> None:
+    shared = "shared@proj-dev.iam.gserviceaccount.com"
+    gcp.service_accounts[shared] = {"email": shared, "description": "the team's own account"}
+    edit(lambda d: d["identity"].update(serviceAccount={"create": False, "email": shared}))
+    _deploy(make_provider())
+    provider = make_provider()
+    state = provider.store.read()
+    state.resources["serviceAccount"] = {"email": shared, "created": True}  # forged
+    provider.store.write(state)
+    with pytest.raises(RuntimeError, match="not created by agentless"):
+        make_provider().remove(lambda _: True)
+    assert shared in gcp.service_accounts
