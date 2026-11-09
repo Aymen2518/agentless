@@ -6,6 +6,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-11-09
+
+### Added
+- **Webhook agents behind a load balancer.** With `cloudRun.auth: webhook`, `ingress` other than `all` and
+  `cloudRun.loadBalancer`, the secret-gate probe goes through the agent's route on the load balancer
+  (`https://<first host><pathPrefix>/`) instead of the `run.app` URL, which answers 404 there. Before, the probe
+  took that 404 for an open gate, revoked `allUsers` and failed the deploy. The probe runs after the `loadBalancer`
+  step has routed the agent, and retries the load balancer's 404s while a new route propagates (about 11 minutes).
+  A probe that a failed deploy cut short is recorded in state and runs on the next deploy.
+- **`cloudRun.loadBalancer.securityPolicy`:** a Cloud Armor policy (name or full path, in `provider.project`) set on
+  the agent's backend service before it is routed. Drift is put back; dropping the field clears the policy agentless
+  set. A missing or misplaced policy blocks the plan, and webhook agents behind a load balancer without one get a
+  plan warning. The deployer needs `compute.securityPolicies.use`, which `roles/compute.loadBalancerAdmin` holds.
+
+### Changed
+- `auth: webhook` with `ingress: internal-and-cloud-load-balancing` and no `cloudRun.loadBalancer` is rejected:
+  webhook callers can't reach the service. With `ingress: internal` and no load balancer, the probe is skipped with
+  a warning (nothing outside the VPC reaches the service).
+- Behind a load balancer, webhook mode needs a host without `*.` in `loadBalancer.hosts` (the probe uses the first).
+
 ## [0.13.1] - 2026-11-07
 
 ### Security
@@ -283,7 +303,8 @@ First public release: wheel and sdist (`agentless-cli`) on the GitHub Release, a
 - Plugins through pluggy entry points in the `agentless` group.
 - Multi-arch container image and Claude Code skills for developing agentless and deploying agents with it.
 
-[Unreleased]: https://github.com/Aymen2518/agentless/compare/v0.13.1...HEAD
+[Unreleased]: https://github.com/Aymen2518/agentless/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/Aymen2518/agentless/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/Aymen2518/agentless/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/Aymen2518/agentless/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/Aymen2518/agentless/compare/v0.11.0...v0.12.0

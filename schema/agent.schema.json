@@ -951,6 +951,20 @@
           "default": null,
           "description": "Scheme of the agent's backend service. Defaults to the scheme of the URL map's default backend service.",
           "title": "Loadbalancingscheme"
+        },
+        "securityPolicy": {
+          "anyOf": [
+            {
+              "pattern": "^([a-z]([-a-z0-9]{0,61}[a-z0-9])?|projects/[^/]+/(global|regions/[a-z0-9-]+)/securityPolicies/[a-z]([-a-z0-9]{0,61}[a-z0-9])?)$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Cloud Armor security policy set on the agent's backend service: the name or full path (projects/<p>/global|regions/<r>/securityPolicies/<name>) of an existing policy in provider.project, global for a global URL map, in provider.region for a regional one. Needs compute.securityPolicies.use.",
+          "title": "Securitypolicy"
         }
       },
       "required": [

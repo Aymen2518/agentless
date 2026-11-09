@@ -317,6 +317,17 @@ class ServiceResource(Resource):
                 f"reject every request without the secret in {header} (checked after each rollout, allUsers revoked "
                 "if not). Under Domain Restricted Sharing, the org's exemption tag must be in cloudRun.tags"
             )
+            url, via_lb = _probe_target(ctx)
+            if url is None:
+                notes.append(
+                    "! auth webhook with ingress internal: the secret gate can't be checked from outside the VPC, so "
+                    "agentless doesn't probe it; make sure the container refuses calls without the secret"
+                )
+            elif via_lb:
+                notes.append(
+                    f"= the secret gate is probed through the load balancer ({url}) once it routes the agent; a new "
+                    "route takes a few minutes to serve, its 404s are retried"
+                )
         return notes
 
     @staticmethod
@@ -385,6 +396,8 @@ class ServiceResource(Resource):
             details.append("~ new image")
         add, remove = self._tag_diff(ctx, name, st)
         details += [f"+ tag {t}" for t in add] + [f"- tag {t}" for t in remove]
+        if st.get("probePending") and run_spec.webhook_header(ctx.project):
+            details.append("~ probe the webhook secret gate (a deploy stopped before it did)")
         if not details:
             return Change(self.key, Action.NOOP, name)  # notes only come with a change, so reruns stay no-ops
         return Change(self.key, Action.UPDATE, name, details + self._notes(ctx), data=data)
@@ -413,7 +426,7 @@ class ServiceResource(Resource):
             spec = engine_spec.redact(desired, ctx.project.sensitive)
             current = live is not None and not live.get("invokerIamDisabled")
             unchanged = current and st.get("spec") == spec and st.get("image") == image
-            if unchanged and not add and not remove:
+            if unchanged and not add and not remove and not st.get("probePending"):
                 return  # a refresh with nothing new: no extra revision
             body = run_spec.api_service(desired, image)
             if live is None:
@@ -429,7 +442,7 @@ class ServiceResource(Resource):
                     ctx.clients.run_service_update(name, body)
         for binding in remove.values():  # after the update: the old settings may have needed it
             ctx.clients.run_service_untag(binding)
-        self._check_webhook_gate(ctx, name, url)
+        pending = self._check_webhook_gate(ctx, name)
         if st.get("image") != image:
             ctx.reapply.update(_CARD_CONSUMERS)  # the agent card can change with the code
         card_url = run_spec.a2a_card_url(url, ctx.project.agent_directory) if is_a2a(ctx) else None
@@ -444,6 +457,7 @@ class ServiceResource(Resource):
                 "image": image,
                 **({"build": build} if build else {}),
                 **({"tags": tags} if tags else {}),
+                **({"probePending": True} if pending else {}),
                 "spec": spec,
             },
         )
@@ -472,10 +486,20 @@ class ServiceResource(Resource):
             ctx.clients.run_service_update(name, body)
 
     @staticmethod
-    def _check_webhook_gate(ctx: Context, name: str, url: str) -> None:
-        """Probe a new revision of a public webhook service; before allUsers is granted, InvokerResource probes."""
-        if run_spec.webhook_header(ctx.project) and _all_users_invoker(ctx, name):
-            _probe_webhook(ctx, name, url)
+    def _check_webhook_gate(ctx: Context, name: str) -> bool:
+        """Probe a new revision of a public webhook service; before allUsers is granted, InvokerResource probes.
+
+        Through a load balancer, the probe waits until `loadBalancer` has routed the agent: `access` runs it after
+        the forward pass. Returns whether it was deferred (recorded in state until it ran, so a deploy that stops in
+        between probes on the next run).
+        """
+        if not (run_spec.webhook_header(ctx.project) and _all_users_invoker(ctx, name)):
+            return False
+        if _probe_target(ctx)[1]:
+            ctx.reapply.add("access")
+            return True
+        _probe_webhook(ctx, name)
+        return False
 
     def plan_destroy(self, ctx: Context) -> Change:  # noqa: D102
         st = self._state(ctx)
@@ -506,18 +530,43 @@ def _all_users_invoker(ctx: Context, name: str) -> bool:
     return run_spec.ALL_USERS in (ctx.clients.iam_members("runService", name) or {}).get(run_spec.INVOKER_ROLE, set())
 
 
-def _probe_webhook(ctx: Context, name: str, url: str) -> None:
+def _probe_target(ctx: Context) -> tuple[str | None, bool]:
+    """Where webhook callers reach the service: (URL, through the load balancer), from config only, never state.
+
+    The run.app URL answers 404 to outside callers unless ingress is all, so behind a load balancer the probe goes
+    through the agent's route on it. With ingress internal and no load balancer, nothing outside the VPC reaches it:
+    None, and the probe is skipped.
+    """
+    run = ctx.project.config.cloud_run
+    assert run is not None
+    lb = run.load_balancer
+    if run.ingress != "all" and lb is not None:
+        host = next(h for h in lb.hosts if not h.startswith("*."))  # the schema requires one
+        return f"https://{host}{lb.path_prefix or ''}/", True
+    if run.ingress == "internal":
+        return None, False
+    return ServiceResource._url(ctx), False
+
+
+def _probe_webhook(ctx: Context, name: str) -> None:
     """With auth: webhook, prove anonymous calls are refused; otherwise revoke allUsers and fail (fail closed)."""
     header = run_spec.webhook_header(ctx.project)
     assert header
+    url, via_lb = _probe_target(ctx)
+    if url is None:
+        ctx.echo(f"    ! ingress internal: not probing the webhook gate; the container must check {header}")
+        return
     revoke = [(run_spec.INVOKER_ROLE, run_spec.ALL_USERS)]
     try:
-        statuses = ctx.clients.webhook_probe(url, header)
+        statuses = ctx.clients.webhook_probe(url, header, load_balancer=via_lb)
     except BaseException:  # a failed or interrupted probe proves nothing: close the service, then re-raise
         ctx.clients.iam_modify("runService", name, [], revoke)
         raise
     if all(status in (401, 403) for status in statuses):
         ctx.echo(f"    anonymous calls refused ({', '.join(map(str, statuses))}); {header} gates the service")
+        service = ctx.state.resources.get("service")
+        if service and service.pop("probePending", None):
+            ctx.save()
         return
     ctx.clients.iam_modify("runService", name, [], revoke)
     raise RuntimeError(
@@ -546,6 +595,9 @@ class LoadBalancerResource(Resource):
             return None
         project, region, svc = cfg.provider.project, cfg.provider.region, cfg.run_service_name
         scope = f"regions/{region}" if lb.regional else "global"
+        policy = lb.security_policy
+        if policy and "/" not in policy:
+            policy = f"projects/{project}/{scope}/securityPolicies/{policy}"
         return {
             "neg": f"projects/{project}/regions/{region}/networkEndpointGroups/{svc}-neg",
             "service": svc,
@@ -555,6 +607,7 @@ class LoadBalancerResource(Resource):
             "hosts": list(lb.hosts),
             "pathPrefix": lb.path_prefix,
             "matcher": f"{routing.MATCHER_PREFIX}{svc}",
+            "securityPolicy": policy,
         }
 
     @staticmethod
@@ -595,6 +648,18 @@ class LoadBalancerResource(Resource):
                 f"can't tell the load balancing scheme of URL map {name} (its default is not a backend service): "
                 "set cloudRun.loadBalancer.loadBalancingScheme"
             )
+        if policy := target["securityPolicy"]:
+            scope = target["urlMap"].rsplit("/urlMaps/", 1)[0]  # projects/<p>/(global|regions/<r>)
+            if not policy.startswith(f"{scope}/securityPolicies/"):
+                return None, (
+                    f"security policy {policy} must be in {scope} (provider.project, and the URL map's region or "
+                    "global): fix cloudRun.loadBalancer.securityPolicy"
+                )
+            if ctx.clients.compute_get(policy) is None:
+                return None, (
+                    f"security policy {policy} not found: create it first (Cloud Armor belongs to your "
+                    "environment's IaC) or fix cloudRun.loadBalancer.securityPolicy"
+                )
         return url_map, None
 
     @staticmethod
@@ -660,12 +725,20 @@ class LoadBalancerResource(Resource):
     def _notes(ctx: Context, target: dict[str, Any]) -> list[str]:
         run = ctx.project.config.cloud_run
         assert run is not None
-        notes = [
-            (
-                "= callers through the load balancer still need roles/run.invoker and a Google ID token "
-                f"(audience {ServiceResource._url(ctx)})"
-            )
-        ]
+        if run_spec.webhook_header(ctx.project):
+            notes = ["= auth webhook: allUsers holds roles/run.invoker; the container's secret check is the gate"]
+            if not target["securityPolicy"]:
+                notes.append(
+                    "! no cloudRun.loadBalancer.securityPolicy: token-less webhook calls reach the container "
+                    "unfiltered; set a Cloud Armor policy (e.g. allow only the sender's IP ranges)"
+                )
+        else:
+            notes = [
+                (
+                    "= callers through the load balancer still need roles/run.invoker and a Google ID token "
+                    f"(audience {ServiceResource._url(ctx)})"
+                )
+            ]
         if run.ingress == "all":
             notes.append(
                 "! ingress all: the service also answers on its run.app URL; set ingress "
@@ -705,6 +778,10 @@ class LoadBalancerResource(Resource):
         route = self._route(ctx, target)
         if details or st.get("urlMap") != target["urlMap"] or not routing.in_place(url_map, route):
             details.append(routing.describe(route, target["urlMap"].rsplit("/", 1)[-1]))
+        recreated = todo["live"]["backendService"] is None or target["backendService"] in todo["deleteBackends"]
+        current = None if recreated else self._live_policy(todo["live"]["backendService"])
+        if line := self._policy_change(st, target["securityPolicy"], current):
+            details.append(line)
         if not details and st and not st.get("spec"):
             details.append("~ finish an interrupted deploy")
         if not details:
@@ -738,6 +815,7 @@ class LoadBalancerResource(Resource):
                     st.pop(key)
                     if key == "backendService":
                         st.pop("scheme", None)
+                        st.pop("securityPolicy", None)
                     self._set_state(ctx, st)
         marker = self._marker(ctx)
         st["matcher"] = target["matcher"]
@@ -756,6 +834,7 @@ class LoadBalancerResource(Resource):
             if key == "backendService":
                 st["scheme"] = target["scheme"]
             self._set_state(ctx, st)
+        self._sync_policy(ctx, st, target)
         # Recorded before the edit: a crash in between leaves entries that the next run or `remove` strips.
         st["urlMap"] = target["urlMap"]
         self._set_state(ctx, st)
@@ -763,6 +842,41 @@ class LoadBalancerResource(Resource):
         if ctx.clients.url_map_edit(target["urlMap"], lambda m: routing.reconcile(m, route)):
             ctx.echo(f"    {routing.describe(route, target['urlMap'].rsplit('/', 1)[-1])[2:]}")
         self._set_state(ctx, {**st, "spec": target})
+
+    @staticmethod
+    def _live_policy(backend: dict[str, Any] | None) -> str | None:
+        return routing.path(backend["securityPolicy"]) if backend and backend.get("securityPolicy") else None
+
+    @staticmethod
+    def _policy_change(st: dict[str, Any], wanted: str | None, current: str | None) -> str | None:
+        """Plan line for the backend's Cloud Armor policy; one set outside agentless with none configured stays."""
+        if wanted == current:
+            return None
+        if wanted:
+            name = wanted.rsplit("/", 1)[-1]
+            if current:
+                return f"~ Cloud Armor policy {current.rsplit('/', 1)[-1]} → {name} (set outside agentless)"
+            return f"+ Cloud Armor policy {name} on the backend service"
+        if current and st.get("securityPolicy") == current:
+            return f"- Cloud Armor policy {current.rsplit('/', 1)[-1]}"
+        return None
+
+    def _sync_policy(self, ctx: Context, st: dict[str, Any], target: dict[str, Any]) -> None:
+        """Set the backend's Cloud Armor policy before it is routed, so it is never served without it."""
+        backend = target["backendService"]
+        current = self._live_policy(ctx.clients.compute_get(backend))
+        wanted = target["securityPolicy"]
+        if self._policy_change(st, wanted, current) is None:
+            if wanted:
+                st["securityPolicy"] = wanted  # also adopts a matching policy that is already set
+            return
+        ctx.clients.backend_security_policy(backend, wanted)
+        ctx.echo(f"    {'set' if wanted else 'cleared'} Cloud Armor policy {wanted or current} on {backend}")
+        if wanted:
+            st["securityPolicy"] = wanted
+        else:
+            st.pop("securityPolicy", None)
+        self._set_state(ctx, st)
 
     @staticmethod
     def _gone(st: dict[str, Any]) -> list[str]:
@@ -888,8 +1002,10 @@ class InvokerResource(AccessResource):
         webhook = service is not None and run_spec.webhook_header(ctx.project) is not None
         granted = webhook and _all_users_invoker(ctx, service)
         super().apply(ctx, change)
-        if webhook and not granted and _all_users_invoker(ctx, service):  # just opened: ServiceResource did not probe
-            _probe_webhook(ctx, service, ServiceResource._url(ctx))
+        # Just opened (ServiceResource did not probe), or a new revision whose probe waited for the load balancer.
+        pending = (ctx.state.resources.get("service") or {}).get("probePending")
+        if webhook and (not granted or pending) and _all_users_invoker(ctx, service):
+            _probe_webhook(ctx, service)
 
 
 ALL_RESOURCES: tuple[type[Resource], ...] = (

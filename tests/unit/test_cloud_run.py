@@ -848,7 +848,7 @@ def test_webhook_fails_closed_when_the_probe_itself_fails(make_run, gcp: FakeGcp
     edit(_webhook)
     real = gcp.webhook_probe
 
-    def broken(_url: str, _header: str) -> list[int]:
+    def broken(_url: str, _header: str, **_kwargs: object) -> list[int]:
         raise error
 
     gcp.webhook_probe = broken  # type: ignore[method-assign]
@@ -1736,3 +1736,260 @@ def test_remove_refuses_another_agents_cloud_run_service(make_run: Callable, gcp
     with pytest.raises(RuntimeError, match="not labelled as sample-agent/dev"):
         make_run().remove(lambda _: True)
     assert other in gcp.run_services
+
+
+# --- auth: webhook behind a load balancer, Cloud Armor -------------------------------------------------------------
+
+HOOKS = "https://hooks.example.com/"
+ARMOR = "projects/proj-dev/global/securityPolicies/webhook-senders"
+
+
+def _webhook_behind_lb(**lb: object) -> Callable[[dict], None]:
+    def apply(data: dict) -> None:
+        _webhook(data)
+        _behind_lb(**({"hosts": ["hooks.example.com"]} | lb))(data)
+
+    return apply
+
+
+def _probes(gcp: FakeGcp) -> list[str]:
+    return [c[1] for c in gcp.calls if c[0] == "webhook_probe"]
+
+
+def test_webhook_behind_a_load_balancer_is_probed_through_its_route_once_routed(
+    make_run, gcp: FakeGcp, edit, lb
+) -> None:
+    edit(_webhook_behind_lb())
+    _, changeset = make_run().plan(DeployOptions())
+    service = next(c for c in changeset.changes if c.resource == "service")
+    assert any(f"probed through the load balancer ({HOOKS})" in d for d in service.details)
+    deploy(make_run())
+
+    assert _all_users(gcp)
+    assert _probes(gcp) == [HOOKS]  # never the run.app URL, which answers 404 off ingress all
+    kinds = gcp.kinds()
+    assert kinds.index("url_map_edit") < kinds.index("webhook_probe")  # the fake answers 404 until routed
+    assert "probePending" not in make_run().store.read().resources["service"]
+    assert actions(make_run())["service"] == Action.NOOP
+
+
+def test_webhook_probe_uses_the_path_prefix(make_run, gcp: FakeGcp, edit, lb) -> None:
+    edit(_webhook_behind_lb(hosts=["*.example.com", "api.example.com"], pathPrefix="/hooks"))
+    gcp.compute[LB_MAP]["hostRules"].append({"hosts": ["*.example.com"], "pathMatcher": "web"})
+    deploy(make_run())
+    assert _probes(gcp) == ["https://api.example.com/hooks/"]  # the first host without a wildcard
+    assert _all_users(gcp)
+
+
+def test_a_new_revision_behind_a_load_balancer_is_probed_after_routing_and_fails_closed(
+    make_run, gcp: FakeGcp, run_dir: Path, edit, lb
+) -> None:
+    edit(_webhook_behind_lb())
+    deploy(make_run())
+    (run_dir / "app" / "agent.py").write_text("# changed\n")
+    gcp.webhook_statuses = (200, 200)  # the new code dropped the gate
+    before = len(gcp.calls)
+    with pytest.raises(RuntimeError, match=f"{HOOKS} answered 200"):
+        deploy(make_run())
+    assert not _all_users(gcp)
+    kinds = gcp.kinds()[before:]
+    assert kinds.index("run_update") < kinds.index("webhook_probe")
+
+    gcp.webhook_statuses = (401, 401)
+    deploy(make_run())
+    assert _all_users(gcp)
+    assert "probePending" not in make_run().store.read().resources["service"]
+
+
+def test_a_probe_cut_short_by_a_failed_route_change_runs_on_the_next_deploy(
+    make_run, gcp: FakeGcp, run_dir: Path, edit, lb, monkeypatch
+) -> None:
+    edit(_webhook_behind_lb())
+    deploy(make_run())
+    (run_dir / "app" / "agent.py").write_text("# changed\n")
+    edit(lambda d: d["cloudRun"]["loadBalancer"].update(hosts=["webhooks.example.com"]))
+    real = gcp.url_map_edit
+
+    def fail(*_a: object, **_k: object) -> bool:
+        monkeypatch.setattr(gcp, "url_map_edit", real)
+        raise RuntimeError("503 backend error")
+
+    monkeypatch.setattr(gcp, "url_map_edit", fail)
+    with pytest.raises(RuntimeError, match="503"):
+        deploy(make_run())
+    assert make_run().store.read().resources["service"]["probePending"] is True  # the new revision is unprobed
+    assert _probes(gcp) == [HOOKS]
+
+    _, changeset = make_run().plan(DeployOptions())
+    service = next(c for c in changeset.changes if c.resource == "service")
+    assert "~ probe the webhook secret gate (a deploy stopped before it did)" in service.details
+    deploy(make_run())
+    assert _probes(gcp) == [HOOKS, "https://webhooks.example.com/"]
+    assert "probePending" not in make_run().store.read().resources["service"]
+    assert actions(make_run())["service"] == Action.NOOP
+
+
+def test_webhook_with_ingress_internal_skips_the_probe(make_run, gcp: FakeGcp, edit) -> None:
+    edit(lambda d: (_webhook(d), d["cloudRun"].update(ingress="internal")))
+    _, changeset = make_run().plan(DeployOptions())
+    service = next(c for c in changeset.changes if c.resource == "service")
+    assert any("agentless doesn't probe it" in d for d in service.details)
+    deploy(make_run())
+    assert _all_users(gcp)
+    assert "webhook_probe" not in gcp.kinds()
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        (
+            lambda d: (_webhook(d), d["cloudRun"].update(ingress="internal-and-cloud-load-balancing")),
+            "needs cloudRun.loadBalancer: webhook callers can't reach the run.app URL",
+        ),
+        (
+            _webhook_behind_lb(hosts=["*.example.com"]),
+            "needs a host without",
+        ),
+        (
+            _behind_lb(hosts=["a.example.com"], securityPolicy="Not_A_Name"),
+            "securityPolicy",
+        ),
+    ],
+)
+def test_webhook_behind_a_load_balancer_is_validated(run_dir: Path, edit, change, message: str) -> None:
+    edit(change)
+    with pytest.raises(ConfigError, match=message):
+        _load(run_dir)
+
+
+def test_a_cloud_armor_policy_is_set_before_the_backend_is_routed(make_run, gcp: FakeGcp, edit, lb) -> None:
+    gcp.compute[ARMOR] = {"name": "webhook-senders"}
+    edit(_webhook_behind_lb(securityPolicy="webhook-senders"))
+    _, changeset = make_run().plan(DeployOptions())
+    balancer = next(c for c in changeset.changes if c.resource == "loadBalancer")
+    assert "+ Cloud Armor policy webhook-senders on the backend service" in balancer.details
+    assert not any("no cloudRun.loadBalancer.securityPolicy" in d for d in balancer.details)
+    deploy(make_run())
+
+    assert gcp.compute[LB_BS]["securityPolicy"].endswith(ARMOR)
+    kinds = gcp.kinds()
+    assert kinds.index("backend_security_policy") < kinds.index("url_map_edit")
+    assert make_run().store.read().resources["loadBalancer"]["securityPolicy"] == ARMOR
+    assert actions(make_run())["loadBalancer"] == Action.NOOP
+
+
+def test_cloud_armor_drift_is_fixed_and_dropping_it_clears_only_agentless_policy(
+    make_run, gcp: FakeGcp, edit, lb
+) -> None:
+    other = "projects/proj-dev/global/securityPolicies/other"
+    gcp.compute[ARMOR] = {"name": "webhook-senders"}
+    gcp.compute[other] = {"name": "other"}
+    edit(_behind_lb(hosts=["agent.example.com"], securityPolicy=ARMOR))  # the full path works too
+    deploy(make_run())
+
+    gcp.compute[LB_BS]["securityPolicy"] = f"https://www.googleapis.com/compute/v1/{other}"  # changed by hand
+    _, changeset = make_run().plan(DeployOptions())
+    balancer = next(c for c in changeset.changes if c.resource == "loadBalancer")
+    assert "~ Cloud Armor policy other → webhook-senders (set outside agentless)" in balancer.details
+    deploy(make_run())
+    assert gcp.compute[LB_BS]["securityPolicy"].endswith(ARMOR)
+
+    edit(lambda d: d["cloudRun"]["loadBalancer"].pop("securityPolicy"))
+    _, changeset = make_run().plan(DeployOptions())
+    balancer = next(c for c in changeset.changes if c.resource == "loadBalancer")
+    assert "- Cloud Armor policy webhook-senders" in balancer.details
+    deploy(make_run())
+    assert "securityPolicy" not in gcp.compute[LB_BS]
+    assert "securityPolicy" not in make_run().store.read().resources["loadBalancer"]
+
+    gcp.compute[LB_BS]["securityPolicy"] = f"https://www.googleapis.com/compute/v1/{other}"  # someone else's
+    assert actions(make_run())["loadBalancer"] == Action.NOOP
+
+
+@pytest.mark.parametrize(
+    ("policy", "message"),
+    [
+        ("missing", "security policy projects/proj-dev/global/securityPolicies/missing not found"),
+        ("projects/elsewhere/global/securityPolicies/waf", "must be in projects/proj-dev/global"),
+        ("projects/proj-dev/regions/europe-west1/securityPolicies/waf", "must be in projects/proj-dev/global"),
+    ],
+)
+def test_a_missing_or_misplaced_cloud_armor_policy_blocks(
+    make_run, gcp: FakeGcp, edit, lb, policy: str, message: str
+) -> None:
+    gcp.compute["projects/proj-dev/regions/europe-west1/securityPolicies/waf"] = {"name": "waf"}
+    edit(_behind_lb(hosts=["agent.example.com"], securityPolicy=policy))
+    _, changeset = make_run().plan(DeployOptions())
+    assert message in ({c.resource: c.blocked for c in changeset.changes}["loadBalancer"] or "")
+    with pytest.raises(DeployError, match="loadBalancer"):
+        deploy(make_run())
+    assert LB_BS not in gcp.compute
+
+
+def test_webhook_behind_a_load_balancer_without_cloud_armor_warns(make_run, edit, lb) -> None:
+    edit(_webhook_behind_lb())
+    _, changeset = make_run().plan(DeployOptions())
+    balancer = next(c for c in changeset.changes if c.resource == "loadBalancer")
+    assert any("no cloudRun.loadBalancer.securityPolicy" in d for d in balancer.details)
+    assert not any("Google ID token" in d for d in balancer.details)
+
+
+def test_load_balancer_probe_retries_404s_while_the_route_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
+    import requests
+
+    from agentless.providers.cloud_run.clients import CloudRunClients
+
+    class Reply:
+        def __init__(self, status: int) -> None:
+            self.status_code, self.text = status, ""
+
+    replies = iter([Reply(404), Reply(404), Reply(502), Reply(401), Reply(401)])
+    urls = []
+
+    def get(url: str, **_k: object) -> Reply:
+        urls.append(url)
+        return next(replies)
+
+    monkeypatch.setattr(requests, "get", get)
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    client = object.__new__(CloudRunClients)
+    assert client.webhook_probe(HOOKS, "x-gitlab-token", load_balancer=True) == [401, 401]
+    assert urls == [HOOKS] * 5
+
+    replies = iter([Reply(404)] * 200)
+    statuses = client.webhook_probe(HOOKS, "x-gitlab-token", load_balancer=True)
+    assert statuses == [404, 404]  # a 404 that lasts is not a refusal
+
+    replies = iter([Reply(404), Reply(401)])
+    assert client.webhook_probe(URL, "x-gitlab-token") == [404, 401]  # run.app: a 404 is an answer, as before
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://hooks.example.com/",
+        "https://hooks.example.com:8443/",
+        "https://user@hooks.example.com/",
+        "https://hooks.example.com/?x=1",
+        "https://hooks.example.com/hooks",
+        "https://*.example.com/",
+        "https://localhost/",
+    ],
+)
+def test_load_balancer_probe_only_goes_to_a_plain_https_route(url: str) -> None:
+    from agentless.providers.cloud_run.clients import CloudRunClients
+
+    with pytest.raises(RuntimeError, match="refusing to probe"):
+        object.__new__(CloudRunClients).webhook_probe(url, "x-gitlab-token", load_balancer=True)
+    with pytest.raises(RuntimeError, match="refusing"):
+        object.__new__(CloudRunClients).webhook_probe(HOOKS, "x-gitlab-token")  # not run.app without the flag
+
+
+def test_webhook_code_only_behind_a_load_balancer_still_probes(make_run, gcp: FakeGcp, run_dir: Path, edit, lb) -> None:
+    edit(_webhook_behind_lb())
+    deploy(make_run())
+    (run_dir / "app" / "agent.py").write_text("# changed\n")
+    deploy(make_run(), code_only=True)
+    assert _probes(gcp) == [HOOKS, HOOKS]
+    assert _all_users(gcp)
+    assert "probePending" not in make_run().store.read().resources["service"]
