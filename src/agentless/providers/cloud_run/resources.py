@@ -562,7 +562,10 @@ def _probe_webhook(ctx: Context, name: str) -> None:
     except BaseException:  # a failed or interrupted probe proves nothing: close the service, then re-raise
         ctx.clients.iam_modify("runService", name, [], revoke)
         raise
-    if all(status in (401, 403) for status in statuses):
+    # Through a load balancer, Cloud Armor (deny-403) and the load balancer answer 403 themselves, without reaching
+    # the container: only its 401 proves the gate. Cloud Run's own IAM 403 is already discarded by the probe.
+    refused = (401,) if via_lb else (401, 403)
+    if all(status in refused for status in statuses):
         ctx.echo(f"    anonymous calls refused ({', '.join(map(str, statuses))}); {header} gates the service")
         service = ctx.state.resources.get("service")
         if service and service.pop("probePending", None):
@@ -571,9 +574,15 @@ def _probe_webhook(ctx: Context, name: str) -> None:
     ctx.clients.iam_modify("runService", name, [], revoke)
     raise RuntimeError(
         f"auth webhook: {url} answered {statuses[0]} without {header} and {statuses[1]} with a wrong one; "
-        f"the container must answer 401 or 403 to every request without the secret (AGENTLESS_WEBHOOK_SECRET "
-        "in AGENTLESS_WEBHOOK_HEADER), on every path including /. allUsers was revoked: the next deploy grants it "
-        "again and probes."
+        f"the container must answer {' or '.join(map(str, refused))} to every request without the secret "
+        "(AGENTLESS_WEBHOOK_SECRET in AGENTLESS_WEBHOOK_HEADER), on every path including /"
+        + (
+            "; behind a load balancer only 401 counts, since Cloud Armor answers 403 itself (let the machine that "
+            "deploys through the security policy)"
+            if via_lb
+            else ""
+        )
+        + ". allUsers was revoked: the next deploy grants it again and probes."
     )
 
 

@@ -133,21 +133,28 @@ class BaseProvider:
                 raise DeployError("; ".join(f"{c.resource}: {c.blocked}" for c in changeset.blocked))
             by_key = {r.key: r for r in self.resources}
             self.hooks.hook.agentless_before_apply(context=ctx, changeset=changeset)
-            for change in changeset.changes:
-                if change.action == Action.NOOP:
-                    continue
-                self.echo(f"  → {change.resource}: {change.action.value} {change.summary}")
-                by_key[change.resource].apply(ctx, change)
-            for resource in self.resources:
-                if resource.key in ctx.reapply:
-                    self.echo(f"  → {resource.key}: refresh")
-                    resource.apply(ctx, Change(resource.key, Action.UPDATE, "refresh"))
+            try:
+                for change in changeset.changes:
+                    if change.action == Action.NOOP:
+                        continue
+                    self.echo(f"  → {change.resource}: {change.action.value} {change.summary}")
+                    by_key[change.resource].apply(ctx, change)
+                for resource in self.resources:
+                    if resource.key in ctx.reapply:
+                        self.echo(f"  → {resource.key}: refresh")
+                        resource.apply(ctx, Change(resource.key, Action.UPDATE, "refresh"))
+            except BaseException:
+                self._apply_failed(ctx)
+                raise
             for change in reversed(changeset.changes):
                 by_key[change.resource].cleanup(ctx, change)
             ctx.save()
         self._write_metadata(ctx)
         self.hooks.hook.agentless_after_deploy(context=ctx, changeset=changeset)
         return changeset
+
+    def _apply_failed(self, ctx: Context) -> None:
+        """Close what must not stay open when an apply stops midway (still under the lock); the error is re-raised."""
 
     def status(self) -> bool:
         """Finalize a `--no-wait` operation; True when nothing is pending anymore."""

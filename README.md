@@ -729,8 +729,11 @@ cloudRun:
   the `loadBalancer` step. A new route takes about 3 minutes to serve, so the load balancer's 404s are retried for
   about 11 minutes; a 404 that lasts fails the check. The URL comes from `cloudRun.loadBalancer` only, never from
   state, and must be a plain `https://<host>/…` URL: the load balancer must serve HTTPS for that host.
-- If the probe can't run (a deploy failing between the new revision and the routing), it's recorded in state and
-  runs on the next deploy.
+- **Only a 401 passes through the load balancer.** Cloud Armor (and the load balancer itself) can answer 403 without
+  reaching the container, so a 403 proves nothing there: the container must answer **401** without the secret, and
+  the security policy must let the machine that deploys (CI runner, workstation) reach the agent.
+- If a deploy fails after the new revision is out but before its probe ran, agentless revokes `allUsers` before
+  reporting the error. The next deploy grants it again and probes.
 - While a new route propagates, the probe could reach the URL map's default service instead. If that service
   answers 401 or 403 on `/`, the probe can't tell it from the agent; the safest default service answers 404.
 - `ingress: internal-and-cloud-load-balancing` without `loadBalancer` is rejected: webhook callers can't reach it.

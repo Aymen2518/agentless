@@ -1801,7 +1801,7 @@ def test_a_new_revision_behind_a_load_balancer_is_probed_after_routing_and_fails
     assert "probePending" not in make_run().store.read().resources["service"]
 
 
-def test_a_probe_cut_short_by_a_failed_route_change_runs_on_the_next_deploy(
+def test_a_deploy_failing_before_the_deferred_probe_closes_the_service(
     make_run, gcp: FakeGcp, run_dir: Path, edit, lb, monkeypatch
 ) -> None:
     edit(_webhook_behind_lb())
@@ -1817,13 +1817,13 @@ def test_a_probe_cut_short_by_a_failed_route_change_runs_on_the_next_deploy(
     monkeypatch.setattr(gcp, "url_map_edit", fail)
     with pytest.raises(RuntimeError, match="503"):
         deploy(make_run())
-    assert make_run().store.read().resources["service"]["probePending"] is True  # the new revision is unprobed
+    assert not _all_users(gcp)  # the new revision was never probed: closed before the error surfaces
+    assert "probePending" not in make_run().store.read().resources["service"]
     assert _probes(gcp) == [HOOKS]
 
-    _, changeset = make_run().plan(DeployOptions())
-    service = next(c for c in changeset.changes if c.resource == "service")
-    assert "~ probe the webhook secret gate (a deploy stopped before it did)" in service.details
+    assert actions(make_run())["access"] != Action.NOOP  # allUsers is granted again, then probed
     deploy(make_run())
+    assert _all_users(gcp)
     assert _probes(gcp) == [HOOKS, "https://webhooks.example.com/"]
     assert "probePending" not in make_run().store.read().resources["service"]
     assert actions(make_run())["service"] == Action.NOOP
@@ -1993,3 +1993,23 @@ def test_webhook_code_only_behind_a_load_balancer_still_probes(make_run, gcp: Fa
     assert _probes(gcp) == [HOOKS, HOOKS]
     assert _all_users(gcp)
     assert "probePending" not in make_run().store.read().resources["service"]
+
+
+def test_a_pending_probe_left_in_state_shows_in_the_plan_and_runs(make_run, gcp: FakeGcp, edit, lb) -> None:
+    edit(_webhook_behind_lb())
+    deploy(make_run())
+    _tamper(make_run(), "service", probePending=True)  # e.g. the revoke itself failed when a deploy stopped
+    _, changeset = make_run().plan(DeployOptions())
+    service = next(c for c in changeset.changes if c.resource == "service")
+    assert "~ probe the webhook secret gate (a deploy stopped before it did)" in service.details
+    deploy(make_run())
+    assert _probes(gcp) == [HOOKS, HOOKS]
+    assert "probePending" not in make_run().store.read().resources["service"]
+
+
+def test_through_a_load_balancer_a_403_does_not_prove_the_gate(make_run, gcp: FakeGcp, edit, lb) -> None:
+    edit(_webhook_behind_lb())
+    gcp.webhook_statuses = (403, 403)  # Cloud Armor's deny-403 never reaches the container
+    with pytest.raises(RuntimeError, match="only 401 counts"):
+        deploy(make_run())
+    assert not _all_users(gcp)
