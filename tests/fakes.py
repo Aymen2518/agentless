@@ -335,6 +335,17 @@ class FakeGcp:
             raise RuntimeError(f"400 resourceInUseByAnotherResource: {path} is used by {users}")
         self.compute.pop(path)
 
+    def backend_security_policy(self, backend: str, policy: str | None) -> None:
+        if backend not in self.compute:
+            raise RuntimeError(f"404 backend service {backend} not found")
+        if policy and policy not in self.compute:
+            raise RuntimeError(f"400 security policy {policy} not found")
+        self.calls.append(("backend_security_policy", backend, policy))
+        if policy:
+            self.compute[backend]["securityPolicy"] = f"https://www.googleapis.com/compute/v1/{policy}"
+        else:
+            self.compute[backend].pop("securityPolicy", None)
+
     def url_map_edit(self, path: str, edit: Any) -> bool:
         for _ in range(5):
             url_map = self.compute_get(path)
@@ -400,12 +411,46 @@ class FakeGcp:
     # auth: webhook probe: what the container answers anonymous calls (set webhook_statuses to simulate a bad app)
     webhook_statuses: tuple[int, int] = (401, 401)
 
-    def webhook_probe(self, url: str, header: str) -> list[int]:
+    def webhook_probe(self, url: str, header: str, *, load_balancer: bool = False) -> list[int]:
         self.calls.append(("webhook_probe", url, header))
-        host = url.split("//", 1)[-1]
-        name = next((n for n in self.run_services if host.startswith(n.rsplit("/", 1)[-1] + "-")), None)
+        if load_balancer:
+            name = self._lb_routed_service(url)
+            if name is None:
+                return [404, 404]  # the route isn't there (yet): the load balancer answers 404
+        else:
+            host = url.split("//", 1)[-1]
+            name = next((n for n in self.run_services if host.startswith(n.rsplit("/", 1)[-1] + "-")), None)
+            if (
+                name is not None
+                and self.run_services[name].get("ingress", "INGRESS_TRAFFIC_ALL") != "INGRESS_TRAFFIC_ALL"
+            ):
+                return [404, 404]  # run.app off ingress all: the Google Frontend answers 404
         public = name is not None and "allUsers" in self.policies[("runService", name)].get("roles/run.invoker", set())
         return list(self.webhook_statuses) if public else [403, 403]  # anonymous calls hit IAM first
+
+    def _lb_routed_service(self, url: str) -> str | None:
+        """Cloud Run service a load balancer URL reaches through a URL map, its backend service and NEG."""
+        host, _, rest = url.split("//", 1)[1].partition("/")
+        path = "/" + rest
+        for map_path, url_map in self.compute.items():
+            if "/urlMaps/" not in map_path:
+                continue
+            rule = next((r for r in url_map.get("hostRules", []) if host in r.get("hosts", [])), None)
+            if rule is None:
+                continue
+            matcher = next(m for m in url_map.get("pathMatchers", []) if m["name"] == rule["pathMatcher"])
+            service = matcher.get("defaultService", "")
+            for path_rule in matcher.get("pathRules", []):
+                if any(path == p or (p.endswith("/*") and path.startswith(p[:-1])) for p in path_rule["paths"]):
+                    service = path_rule["service"]
+                    break
+            backend = self.compute.get(service[service.find("projects/") :]) or {}
+            for group in backend.get("backends", []):
+                neg = self.compute.get(group["group"][group["group"].find("projects/") :]) or {}
+                svc = (neg.get("cloudRun") or {}).get("service")
+                return next((n for n in self.run_services if n.endswith(f"/services/{svc}")), None)
+            return None
+        return None
 
     # A2A card served by an engine (url = the engine's A2A endpoint, as agents-cli's A2A app does)
     def a2a_card(self, url: str) -> dict[str, Any] | None:

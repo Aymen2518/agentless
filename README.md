@@ -527,6 +527,7 @@ cloudRun:
     urlMap: acme-agents-lb                      # in provider.project; `regional: true` for a regional one
     hosts: [support.agents.acme.example.com]    # this agent gets the host to itself
     # pathPrefix: /support                      # or: share a host your IaC routes; <prefix>/* comes here
+    # securityPolicy: agents-waf                # Cloud Armor policy (name or full path) on the agent's backend
 ```
 
 - **Owned by the agent:** a serverless NEG `<service>-<stage>-neg` and a backend service `<service>-<stage>-lb`,
@@ -541,8 +542,14 @@ cloudRun:
   `remove`, or dropping `loadBalancer`, strips the agent's entries first, then deletes its backend service and NEG.
   The other agents keep serving.
 - **IAM still applies:** callers through the load balancer need `roles/run.invoker` and a Google ID token whose
-  audience is the service's `run.app` URL. For token-less callers, put IAP or Cloud Armor on the load balancer in
-  your IaC.
+  audience is the service's `run.app` URL. For token-less callers ([`auth: webhook`](#webhook-mode)), put IAP on
+  the load balancer in your IaC, or Cloud Armor on the agent's backend with `securityPolicy`.
+- **Cloud Armor (`securityPolicy`):** the name, or full path, of an existing security policy in `provider.project`.
+  It must be global for a global URL map, or in `provider.region` for a regional one. agentless sets it on the
+  backend service (`setSecurityPolicy`) before the URL map routes to it, and puts it back if it was changed
+  outside agentless. A missing or misplaced policy blocks the plan. Dropping `securityPolicy` clears the policy
+  agentless set; a policy set by someone else while none is configured is left alone. The policy itself belongs to
+  your IaC. With `auth: webhook` and no `securityPolicy`, the plan warns.
 - **If Terraform owns the URL map,** its next apply removes every entry agents added, and they stay unrouted until
   each redeploys. Add `lifecycle { ignore_changes = [host_rule, path_matcher] }` to the `google_compute_url_map`, or
   keep agent routes out of Terraform's view some other way.
@@ -550,7 +557,9 @@ cloudRun:
 - A host someone adds by hand to an agent's own host rule goes away when the agent is removed or moved.
 - A renamed service (`cloudRun.serviceName`, `service`), a scheme change, or a move to another URL map recreates
   what has to change, unrouting first. Conflicts are checked on a fresh read before anything is unrouted.
-- The deployer needs `roles/compute.loadBalancerAdmin` (NEG, backend service, URL map) in the project.
+- The deployer needs `roles/compute.loadBalancerAdmin` (NEG, backend service, URL map) in the project. It also
+  holds `compute.securityPolicies.use` and `compute.backendServices.setSecurityPolicy` (and their regional
+  equivalents), which `securityPolicy` needs. With a narrower custom role, add those.
 
 **Never public** (unless you opt into [`auth: webhook`](#webhook-mode)). Every caller needs a Google identity that
 holds `roles/run.invoker`:
@@ -682,8 +691,8 @@ cloudRun:
   (read from Secret Manager by Cloud Run, never by agentless). The runtime SA gets `secretAccessor` on that secret.
   The container must answer **401 or 403 to every request, on every path, WebSockets included,** unless the header matches. Compare the
   two values in constant time.
-- **agentless checks it after every rollout (fail closed).** It calls `GET /` with no credentials, once without the
-  header and once with a wrong value. It probes right after granting `allUsers` on a new service, and after every
+- **agentless checks it after every rollout (fail closed).** It calls `GET /` with no credentials (through the load
+  balancer when [behind one](#webhook-behind-a-load-balancer)), once without the header and once with a wrong value. It probes right after granting `allUsers` on a new service, and after every
   new revision of a public one (`--code-only` included). Cloud Run's own IAM refusal (while a fresh grant propagates)
   doesn't count: the probe waits, up to about 6 minutes, for the container's answer. If either answer isn't 401 or
   403, or the container never answers, it revokes `allUsers` and the deploy fails; the next deploy grants it again
@@ -694,7 +703,39 @@ cloudRun:
 - **`invoke`** reads the secret from Secret Manager as the deployer (or takes `--app-token`) and sends only that
   header, with no Google token. The header is dropped on a redirect to another host.
 - The secret is all that protects the service: rotate it in Secret Manager and in the webhook together. Keep
-  `ingress: all` for SaaS senders. A self-hosted GitLab in your VPC can use `ingress: internal` on top.
+  `ingress: all` for SaaS senders, or put the agent [behind a load balancer](#webhook-behind-a-load-balancer). A
+  self-hosted GitLab in your VPC can use `ingress: internal` on top. Nothing outside the VPC reaches the service
+  then, so agentless skips the probe (the plan warns) and the gate is yours to check.
+
+<a id="webhook-behind-a-load-balancer"></a>
+**Webhook behind a load balancer.** Keep the service private, served only through your load balancer, with Cloud
+Armor filtering token-less callers:
+
+```yaml
+cloudRun:
+  auth: webhook
+  ingress: internal-and-cloud-load-balancing
+  webhook: { secret: { secret: gitlab-webhook-token } }
+  loadBalancer:
+    urlMap: acme-agents-lb
+    hosts: [hooks.agents.acme.example.com]
+    securityPolicy: gitlab-senders           # e.g. allow only GitLab's egress ranges
+  tags:
+    "123456789012/allUsersIngress": "True"   # still needed for the allUsers grant under Domain Restricted Sharing
+```
+
+- **The probe goes through the load balancer:** `GET https://<first host without '*.'><pathPrefix>/`, as webhook
+  callers do (the `run.app` URL answers 404 off `ingress: all`). It runs once the URL map routes the agent, after
+  the `loadBalancer` step. A new route takes about 3 minutes to serve, so the load balancer's 404s are retried for
+  about 11 minutes; a 404 that lasts fails the check. The URL comes from `cloudRun.loadBalancer` only, never from
+  state, and must be a plain `https://<host>/…` URL: the load balancer must serve HTTPS for that host.
+- If the probe can't run (a deploy failing between the new revision and the routing), it's recorded in state and
+  runs on the next deploy.
+- While a new route propagates, the probe could reach the URL map's default service instead. If that service
+  answers 401 or 403 on `/`, the probe can't tell it from the agent; the safest default service answers 404.
+- `ingress: internal-and-cloud-load-balancing` without `loadBalancer` is rejected: webhook callers can't reach it.
+- **Tags:** `allUsersIngress` (or your org's Domain Restricted Sharing exemption) is still needed for the
+  `allUsers` grant. `allowIngressAllForCloudRun` is only for `ingress: all`; it isn't needed here.
 
 The check in an agents-cli FastAPI app (`app/fast_api_app.py`). It must be a pure ASGI middleware: an
 `@app.middleware("http")` never sees WebSocket connections, so the ADK `/run_live` socket would stay open. Serve
@@ -797,7 +838,7 @@ Without a TTY (CI), `deploy` applies without asking, like `serverless deploy`. W
 |---|---|
 | Deployer (your user, a CI service account via Workload Identity Federation, or the impersonated `provider.deployer`) | `roles/aiplatform.admin`, `roles/iam.serviceAccountAdmin`, `roles/iam.serviceAccountUser`, `roles/resourcemanager.projectIamAdmin`, `roles/storage.objectAdmin` on the state bucket, `roles/secretmanager.admin` (or `setIamPolicy`) on the agent's secrets, `roles/discoveryengine.editor` to publish (`roles/discoveryengine.admin` on the app for `agentGateway`), `roles/agentregistry.editor` for `publish.agentRegistry`, `roles/storage.admin` when `resources.buckets` is used, `roles/monitoring.viewer` for `agentless metrics`, `roles/storage.objectAdmin` on `evaluation.dest` for `agentless eval`. Org-level grants also need org IAM admin. Leave `identity.roles.organization` out until that's approved. |
 | Vertex AI service agents (evaluation) | the Evaluation Service writes results to `evaluation.dest` and calls the engine; grant its service agent `roles/storage.objectAdmin` on that bucket if the run reports a permission error |
-| Deployer, Cloud Run target | instead of `roles/aiplatform.admin`: `roles/run.admin` (also lets agentless read the agent card), `roles/cloudbuild.builds.editor`, `roles/artifactregistry.reader` on the repository, `roles/storage.objectAdmin` on the staging bucket, `roles/iam.serviceAccountUser` on the runtime SA (and on the build SA). Keep `roles/aiplatform.admin` when a session engine is used. With `cloudRun.loadBalancer`, `roles/compute.loadBalancerAdmin` (NEG, backend service, URL map) |
+| Deployer, Cloud Run target | instead of `roles/aiplatform.admin`: `roles/run.admin` (also lets agentless read the agent card), `roles/cloudbuild.builds.editor`, `roles/artifactregistry.reader` on the repository, `roles/storage.objectAdmin` on the staging bucket, `roles/iam.serviceAccountUser` on the runtime SA (and on the build SA). Keep `roles/aiplatform.admin` when a session engine is used. With `cloudRun.loadBalancer`, `roles/compute.loadBalancerAdmin` (NEG, backend service, URL map, and `compute.securityPolicies.use` for `securityPolicy`) |
 | Cloud Build service account | `roles/artifactregistry.writer` on the repository, `roles/storage.objectViewer` on the staging bucket, `roles/logging.logWriter` |
 | Caller, when impersonating a deployer | `roles/iam.serviceAccountTokenCreator` on the deployer SA (and on each delegate) |
 | Runtime SA or Agent Identity principal | what `identity.roles` lists, plus automatic grants: secrets, the artifacts bucket, declared buckets, and with tracing on `cloudtrace.agent`, `logging.logWriter`, `monitoring.metricWriter` |

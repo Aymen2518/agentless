@@ -225,6 +225,14 @@ class LoadBalancer(_Model):
         description="Scheme of the agent's backend service. Defaults to the scheme of the URL map's default "
         "backend service.",
     )
+    security_policy: str | None = Field(
+        default=None,
+        pattern=r"^([a-z]([-a-z0-9]{0,61}[a-z0-9])?|projects/[^/]+/(global|regions/[a-z0-9-]+)/securityPolicies/"
+        r"[a-z]([-a-z0-9]{0,61}[a-z0-9])?)$",
+        description="Cloud Armor security policy set on the agent's backend service: the name or full path "
+        "(projects/<p>/global|regions/<r>/securityPolicies/<name>) of an existing policy in provider.project, global "
+        "for a global URL map, in provider.region for a regional one. Needs compute.securityPolicies.use.",
+    )
 
     @field_validator("hosts")
     @classmethod
@@ -332,6 +340,18 @@ class CloudRun(_Model):
                 raise ValueError("auth webhook needs cloudRun.webhook.secret")
             if self.iap:
                 raise ValueError("auth webhook and iap are exclusive: webhook callers cannot pass IAP")
+            if self.ingress == "internal-and-cloud-load-balancing" and self.load_balancer is None:
+                raise ValueError(
+                    "auth webhook with ingress internal-and-cloud-load-balancing needs cloudRun.loadBalancer: webhook "
+                    "callers can't reach the run.app URL; set cloudRun.loadBalancer, or use ingress all (or internal "
+                    "for a sender inside the VPC)"
+                )
+            lb = self.load_balancer
+            if self.ingress != "all" and lb is not None and all(h.startswith("*.") for h in lb.hosts):
+                raise ValueError(
+                    "auth webhook behind a load balancer needs a host without '*.' in cloudRun.loadBalancer.hosts: "
+                    "agentless probes the secret gate through the first one"
+                )
         elif self.webhook is not None:
             raise ValueError("cloudRun.webhook is only valid with auth: webhook")
         return self

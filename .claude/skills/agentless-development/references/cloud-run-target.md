@@ -80,6 +80,19 @@ User docs: README "Cloud Run target", `examples/cloud-run.yaml`.
    `_compute_call` retries 400 `resourceNotReady` (and `resourceInUseByAnotherResource` on delete);
    `url_map_edit` retries `resourceNotReady` too. An empty matcher or backend strips nothing.
 
+7. **Webhook behind a load balancer (2026-11-09, 0.14):** with `auth: webhook`, `ingress` other than `all` and
+   `loadBalancer`, `_probe_target` returns `https://<first non-wildcard host><pathPrefix>/` (config only;
+   `clients.load_balancer_url` checks it) and `webhook_probe(load_balancer=True)` also retries 404s
+   (`_LB_PROBE_ATTEMPTS`, ~11 min) while the route propagates. `ServiceResource._check_webhook_gate` defers the
+   new-revision probe to `access` (reapply) so it runs after `loadBalancer`, and records `service.probePending`
+   until it ran (a failed deploy in between probes on the next run; plan shows it). `ingress: internal` without a
+   load balancer skips the probe with a warning; `internal-and-cloud-load-balancing` without one is rejected by
+   the schema. Known gap: during propagation the probe may hit the URL map's default service; one answering
+   401/403 on `/` would pass it. `loadBalancer.securityPolicy` (Cloud Armor) is set with
+   `backendServices.setSecurityPolicy` after the backend insert and before the URL map edit (the insert body's
+   `securityPolicy` is output-only); drift is reset, clearing only one recorded in `state.loadBalancer.securityPolicy`.
+   Unverified live: the clear body (`{}`) and the regional setSecurityPolicy path.
+
 ## Resource notes
 - **`ServiceResource`:**
   - Its spec (`cloud_run/spec.desired_spec`) is a flat dict like the engine spec, so `spec.diff`, `describe` and

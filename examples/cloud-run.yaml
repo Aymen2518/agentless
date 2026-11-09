@@ -42,6 +42,7 @@ cloudRun:
   #   pathPrefix: /support                 # share the hosts: <prefix>/* is routed here, prefix stripped
   #   # regional: true                     # regional URL map in provider.region
   #   # loadBalancingScheme: EXTERNAL_MANAGED   # default: the scheme of the URL map's default backend service
+  #   # securityPolicy: agents-waf            # Cloud Armor policy on the agent's backend service (must exist)
   timeout: 600s
   cpuThrottling: false
   sessionAffinity: true

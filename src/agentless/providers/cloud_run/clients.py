@@ -5,6 +5,7 @@ The shared service account, IAM, bucket, engine and publishing calls are inherit
 
 from __future__ import annotations
 
+import re
 import time
 import urllib.parse
 from collections.abc import Callable, Iterable
@@ -170,6 +171,11 @@ class CloudRunClients(GcpClients):
             time.sleep(min(2**attempt, 20))
         return {}  # unreachable: the last attempt raises
 
+    def backend_security_policy(self, backend: str, policy: str | None) -> None:
+        """Set (or, with None, clear) the Cloud Armor policy of a backend service and wait."""
+        body = {"securityPolicy": f"{_COMPUTE}/{policy}"} if policy else {}
+        self._compute_wait(self._compute_call("POST", f"{_COMPUTE}/{backend}/setSecurityPolicy", json=body))
+
     def url_map_edit(self, path: str, edit: Callable[[dict[str, Any]], bool]) -> bool:
         """Read-modify-write a shared URL map; returns whether it changed.
 
@@ -282,28 +288,37 @@ class CloudRunClients(GcpClients):
             raise RuntimeError(f"GET {url} -> {response.status_code}: {response.text}")
         return response.json()
 
-    def webhook_probe(self, url: str, header: str) -> list[int]:
+    def webhook_probe(self, url: str, header: str, *, load_balancer: bool = False) -> list[int]:
         """Status codes of anonymous calls without the webhook secret and with a wrong one (auth: webhook).
 
         No credentials are sent: this is what anyone on the internet gets. Retries while a new revision warms up and
         while a fresh allUsers grant propagates: until then Cloud Run IAM answers 403 itself, which proves nothing
         about the container. An answer that never comes from the container counts as 0 (not refused).
+
+        With `load_balancer`, `url` is the agent's route on its load balancer (built from cloudRun.loadBalancer, never
+        from state). A new route takes minutes to serve, and until then the load balancer answers 404: a 404 is
+        retried too, for longer, and only counts if it lasts.
         """
         import secrets as _secrets
 
         import requests
 
-        audience(url)  # only ever probe a Cloud Run URL
+        if load_balancer:
+            load_balancer_url(url)
+        else:
+            audience(url)  # only ever probe a Cloud Run URL
+        attempts = _LB_PROBE_ATTEMPTS if load_balancer else _PROBE_ATTEMPTS
         statuses = []
         for headers in ({}, {header: f"agentless-probe-{_secrets.token_hex(16)}"}):
-            for attempt in range(_PROBE_ATTEMPTS):
+            for attempt in range(attempts):
                 try:
                     response = requests.get(url, headers=headers, timeout=60, allow_redirects=False)
                 except requests.RequestException:  # timeouts too: anything but an answer counts as not refused
                     status = 0
                 else:
                     status = 0 if _iam_denied(response) else response.status_code
-                if status and status != 429 and status < 500:
+                propagating = load_balancer and status == 404
+                if status and status != 429 and status < 500 and not propagating:
                     break
                 time.sleep(min(2**attempt, 15))
             statuses.append(status)
@@ -320,6 +335,8 @@ def _compute_busy(response: Any, reasons: tuple[str, ...]) -> bool:
 
 
 _PROBE_ATTEMPTS = 25  # about 6 minutes of backoff: IAM changes usually propagate within a few
+_LB_PROBE_ATTEMPTS = 45  # about 11 minutes: a new load balancer route takes about 3 to serve, then IAM
+_LB_HOST = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$")
 # Cloud Run's own IAM refusal (Google Frontend page); a container's 403 never carries it.
 _IAM_DENIED = "does not have permission to get URL"
 
@@ -343,6 +360,22 @@ def webhook_session(url: str, header: str, token: str) -> Any:
     session = _Session()
     session.headers[header] = token
     return session
+
+
+def load_balancer_url(url: str) -> str:
+    """Check a webhook probe URL on a load balancer: https, a plain hostname, a path, nothing else."""
+    parts = urllib.parse.urlsplit(url)
+    host = parts.hostname or ""
+    if (
+        parts.scheme != "https"
+        or not _LB_HOST.fullmatch(host)
+        or parts.netloc != host
+        or parts.query
+        or parts.fragment
+        or not parts.path.endswith("/")
+    ):
+        raise RuntimeError(f"refusing to probe {url!r}: not an https://<host>[/<prefix>]/ load balancer route")
+    return url
 
 
 def audience(url: str) -> str:
