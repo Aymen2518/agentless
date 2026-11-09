@@ -25,6 +25,20 @@ class CloudRunProvider(BaseProvider):
         clients.app_token_header = run_spec.app_token_header(self.project)
         return clients
 
+    def _apply_failed(self, ctx: Context) -> None:
+        """A webhook revision whose probe was deferred until after routing is never left public unprobed."""
+        service = ctx.state.resources.get("service") or {}
+        if not service.get("probePending"):
+            return
+        try:
+            ctx.clients.iam_modify("runService", service["name"], [], [(run_spec.INVOKER_ROLE, run_spec.ALL_USERS)])
+        except Exception as e:  # noqa: BLE001 - the original error matters more; the next deploy probes first
+            self.echo(f"  ! could not revoke allUsers from the unprobed revision: {e}")
+            return
+        service.pop("probePending")
+        ctx.save()
+        self.echo("  ! revoked allUsers: the new revision was not probed; the next deploy grants it again and probes")
+
     def _info(self, state: State) -> dict[str, Any]:
         cfg = self.project.config
         service = state.resources.get("service") or {}

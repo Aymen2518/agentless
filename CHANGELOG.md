@@ -8,13 +8,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [0.14.0] - 2026-11-09
 
+### Security
+- **Behind a load balancer, the webhook probe only accepts 401.** A Cloud Armor deny-403 (or any 403 from the load
+  balancer) never reaches the container, so the check could pass whatever the container did. The container
+  must answer 401 without the secret, and the security policy must let the deployer through.
+- **A deploy that fails before a deferred webhook probe revokes `allUsers`.** A failure between the new
+  revision and the routing left that revision public and unprobed until the next deploy.
+
 ### Added
 - **Webhook agents behind a load balancer.** With `cloudRun.auth: webhook`, `ingress` other than `all` and
   `cloudRun.loadBalancer`, the secret-gate probe goes through the agent's route on the load balancer
   (`https://<first host><pathPrefix>/`) instead of the `run.app` URL, which answers 404 there. Before, the probe
   took that 404 for an open gate, revoked `allUsers` and failed the deploy. The probe runs after the `loadBalancer`
   step has routed the agent, and retries the load balancer's 404s while a new route propagates (about 11 minutes).
-  A probe that a failed deploy cut short is recorded in state and runs on the next deploy.
+  If a deploy fails before that probe, `allUsers` is revoked and the next deploy grants it again and probes.
 - **`cloudRun.loadBalancer.securityPolicy`:** a Cloud Armor policy (name or full path, in `provider.project`) set on
   the agent's backend service before it is routed. Drift is put back; dropping the field clears the policy agentless
   set. A missing or misplaced policy blocks the plan, and webhook agents behind a load balancer without one get a
